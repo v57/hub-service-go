@@ -123,6 +123,17 @@ type Candidate struct {
 	ExpiresAt   string `json:"expiresAt"`
 }
 
+// ObservedEndpoint is transport metadata measured by a rendezvous node. It is
+// kept separate from client-declared candidates so callers can distinguish
+// node observation from agent claims.
+type ObservedEndpoint struct {
+	Version   int    `json:"version"`
+	AgentKey  string `json:"agentKey"`
+	Transport string `json:"transport"`
+	Address   string `json:"address"`
+	Port      uint16 `json:"port"`
+}
+
 type NetworkResource struct {
 	Version    int           `json:"version"`
 	ResourceID string        `json:"resourceId"`

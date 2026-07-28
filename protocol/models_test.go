@@ -9,8 +9,9 @@ import (
 )
 
 type rendezvousFixture struct {
-	Ticket    RendezvousTicket `json:"ticket"`
-	Candidate Candidate        `json:"candidate"`
+	Ticket           RendezvousTicket `json:"ticket"`
+	Candidate        Candidate        `json:"candidate"`
+	ObservedEndpoint ObservedEndpoint `json:"observedEndpoint"`
 }
 
 func TestExactJSONRoundTrips(t *testing.T) {

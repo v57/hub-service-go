@@ -27,5 +27,12 @@
     "priority": 100,
     "foundation": "srflx-1",
     "expiresAt": "2026-07-25T00:00:30.000Z"
+  },
+  "observedEndpoint": {
+    "version": 1,
+    "agentKey": "agent-key",
+    "transport": "udp",
+    "address": "203.0.113.10",
+    "port": 51820
   }
 }
