@@ -1,12 +1,14 @@
 // Package hubservice lets a Go process connect to a hub (hub-lite/hub-pro),
 // host post/stream API endpoints, and call API through the hub.
 //
-// Lite port of hub-service (TS reference): no auth, no keychain, no crypto.
+// Port of hub-service (TS reference). Every (re)connect sends a fresh hub-pro
+// auth token from the keychain (see keychain.go); hub-lite ignores it.
 package hubservice
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -26,6 +28,9 @@ type ServiceOptions struct {
 	Name string
 	// Icon is the profile icon: a string or map[string]any{"symbol":..,"text":..}.
 	Icon any
+	// Sign returns the auth token sent on every connect. Default: Sign
+	// (the keychain's `auth` file).
+	Sign func() (string, error)
 }
 
 // Profile is sent to the hub as hub/profile/update on connect.
@@ -78,6 +83,7 @@ type Service struct {
 	paths    map[string]struct{}
 	settings map[string]ApiSettings
 	sender   *channelgo.Sender
+	sign     func() (string, error)
 	mu       sync.Mutex
 }
 
@@ -92,6 +98,10 @@ func New(options ...ServiceOptions) *Service {
 		apps:     []AppHeader{},
 		paths:    map[string]struct{}{},
 		settings: map[string]ApiSettings{},
+		sign:     opts.Sign,
+	}
+	if s.sign == nil {
+		s.sign = Sign
 	}
 	if opts.Address != nil {
 		s.address = opts.Address
@@ -170,12 +180,25 @@ func (s *Service) Start() *Service {
 		return s
 	}
 	sender := client.Connect(s.ch, s.address, client.Options{
+		Headers: s.authHeaders,
 		OnConnect: func(sender *channelgo.Sender) {
 			s.sendUpdates(sender)
 		},
 	})
 	s.sender = sender.Sender
 	return s
+}
+
+// authHeaders signs a fresh token for each connect. If signing fails the
+// connection goes out without auth: hub-lite accepts it, hub-pro treats it as
+// an anonymous connection.
+func (s *Service) authHeaders() map[string]string {
+	token, err := s.sign()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "hub-service: auth token:", err)
+		return nil
+	}
+	return map[string]string{"auth": token, "v": authVersion}
 }
 
 // update builds the current hub/service/update payload.

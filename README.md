@@ -7,7 +7,8 @@ Go port of [hub-service](https://github.com/v57/hub-service) — connect to a
 [hub](https://github.com/v57/hub-lite) (default `ws://127.0.0.1:1997`), host
 your own post/stream API endpoints, register apps, and call API through the hub.
 
-Lite port: no auth, no keychain, no crypto (hub-pro territory). The wire
+Works with hub-lite and hub-pro: every (re)connect sends a fresh hub-pro auth
+token signed with the service's Ed25519 key (hub-lite ignores it). The wire
 contract matches the TS reference (`hub/profile/update`, `hub/service/update`,
 AppInterface + element DSL).
 
@@ -63,13 +64,19 @@ response, _ := service.Send("echo/upper", "hello") // "HELLO"
 ## API
 
 - `New(options ...ServiceOptions)` — `Address` (port or ws:// URL; default
-  `1997` or `$HUB`), `Name`, `Icon`
+  `1997` or `$HUB`), `Name`, `Icon`, `Sign` (token factory; default `Sign`)
 - `Post(path, handler func(body any) (any, error), settings ...ApiSettings) *Service`
 - `Stream(path, handler func(body any, emit func(any) error) error, settings ...ApiSettings) *Service`
 - `App(app App) *Service`
 - `Send(path, body, context...) (any, error)` — client call through the hub
 - `Values(path, body, context...) (*channelgo.Values, error)` — stream call
-- `Start() *Service` — connect; re-announces `hub/service/update` on every reconnect
+- `Start() *Service` — connect with `auth` + `v: 0` headers; re-sends
+  `hub/profile/update` (if set) and `hub/service/update` on every reconnect
+- `Sign() (string, error)` — fresh `key.<pub>.<sig>.<expiry>` token (10 s)
+- `PublicKey() (string, error)` — the service's SPKI public key (base64), its
+  hub-pro identity
+- `SetKeyPath(path)` — key file location (default `$HUBKEY`, else `auth` in
+  the cwd; created on first use, same format as the TS keychain)
 
 `ApiSettings` carries `Permissions` (group auto-filled from the first path
 segment, TS parity) and `Limit` — wire-parity fields that hub-lite ignores.
