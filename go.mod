@@ -15,4 +15,4 @@ require (
 	golang.org/x/sys v0.22.0 // indirect
 )
 
-replace github.com/v57/channel-go => ../channel-go
+replace github.com/v57/channel-go => ../../Channel/channel-go
