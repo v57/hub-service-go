@@ -31,6 +31,10 @@ type ServiceOptions struct {
 	// Sign returns the auth token sent on every connect. Default: Sign
 	// (the keychain's `auth` file).
 	Sign func() (string, error)
+	// OnConnect runs after every (re)connect, once the profile and service
+	// updates are queued. It runs on the connection's event loop: sends from
+	// it work, and a sender kept for later is safe to use from any goroutine.
+	OnConnect func(sender *channelgo.Sender)
 }
 
 // Profile is sent to the hub as hub/profile/update on connect.
@@ -80,11 +84,12 @@ type Service struct {
 	apps    []AppHeader
 	// paths tracks every registered handler path (post, stream, app) in
 	// registration-independent order; used to build the services list.
-	paths    map[string]struct{}
-	settings map[string]ApiSettings
-	sender   *channelgo.Sender
-	sign     func() (string, error)
-	mu       sync.Mutex
+	paths     map[string]struct{}
+	settings  map[string]ApiSettings
+	sender    *channelgo.Sender
+	sign      func() (string, error)
+	onConnect func(*channelgo.Sender)
+	mu        sync.Mutex
 }
 
 // New creates a Service. Options are optional; the first one wins.
@@ -94,11 +99,12 @@ func New(options ...ServiceOptions) *Service {
 		opts = options[0]
 	}
 	s := &Service{
-		ch:       channelgo.NewChannel(),
-		apps:     []AppHeader{},
-		paths:    map[string]struct{}{},
-		settings: map[string]ApiSettings{},
-		sign:     opts.Sign,
+		ch:        channelgo.NewChannel(),
+		apps:      []AppHeader{},
+		paths:     map[string]struct{}{},
+		settings:  map[string]ApiSettings{},
+		sign:      opts.Sign,
+		onConnect: opts.OnConnect,
 	}
 	if s.sign == nil {
 		s.sign = Sign
@@ -130,6 +136,21 @@ func (s *Service) Stream(path string, handler func(body any, emit func(any) erro
 	s.addPath(path, settings)
 	s.ch.Stream(path, func(body channelgo.Body, emit channelgo.StreamEmitter) error {
 		return handler(body.Body, emit.Emit)
+	})
+	return s
+}
+
+// StreamContext registers a streaming API endpoint whose ctx is cancelled
+// when the caller cancels the stream, for handlers that wait between values.
+func (s *Service) StreamContext(path string, handler func(ctx context.Context, body any, emit func(any) error) error, settings ...ApiSettings) *Service {
+	s.addPath(path, settings)
+	s.ch.Stream(path, func(body channelgo.Body, emit channelgo.StreamEmitter) error {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if body.Task != nil {
+			body.Task.OnCancel(cancel)
+		}
+		return handler(ctx, body.Body, emit.Emit)
 	})
 	return s
 }
@@ -183,10 +204,31 @@ func (s *Service) Start() *Service {
 		Headers: s.authHeaders,
 		OnConnect: func(sender *channelgo.Sender) {
 			s.sendUpdates(sender)
+			if s.onConnect != nil {
+				s.onConnect(sender)
+			}
 		},
 	})
 	s.sender = sender.Sender
 	return s
+}
+
+// Sender returns the hub connection's sender, nil before Start and after Stop.
+func (s *Service) Sender() *channelgo.Sender {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sender
+}
+
+// Stop closes the hub connection. Start connects again.
+func (s *Service) Stop() {
+	s.mu.Lock()
+	sender := s.sender
+	s.sender = nil
+	s.mu.Unlock()
+	if sender != nil {
+		sender.Stop()
+	}
 }
 
 // authHeaders signs a fresh token for each connect. If signing fails the
