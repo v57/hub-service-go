@@ -180,26 +180,35 @@ func (h *infoHub) next(t *testing.T) map[string]string {
 	}
 }
 
-func TestServiceLearnsHubKeyAndReconnectsWithV1(t *testing.T) {
+func TestServiceAsksHubKeyBeforeConnecting(t *testing.T) {
 	v := loadVectors(t)
 	hub := newInfoHub(t, v.Keys["hub"].PublicKey)
 	private, _ := KeyFromFile(v.Keys["service"].KeyFile)
 	pins := filepath.Join(t.TempDir(), "hubs.json")
 	s := New(ServiceOptions{Address: hub.port, Key: private, HubKeys: pins})
+	// A call made right away waits for the hub-bound connection.
+	reply := make(chan error, 1)
 	s.Start()
 	defer s.Stop()
+	go func() {
+		_, err := s.Send("hub/info", nil)
+		reply <- err
+	}()
 
-	// The first (v0) connection only learns the key; the service registers
-	// on the hub-bound one.
+	// hub/info goes on a short anonymous connection; the service connects
+	// once, hub-bound.
 	registered := hub.next(t)
 	if registered["v"] != "1" {
 		t.Fatalf("registered connect headers: %v", registered)
 	}
 	verifyToken(t, registered["auth"], "hub1:"+v.Keys["hub"].PublicKey+":")
+	if err := <-reply; err != nil {
+		t.Fatalf("call made before the connect: %v", err)
+	}
 	hub.mu.Lock()
 	connects := append([]map[string]string(nil), hub.headers...)
 	hub.mu.Unlock()
-	if len(connects) != 2 || connects[0]["v"] != "0" || !strings.HasPrefix(connects[0]["auth"], "key."+v.Keys["service"].PublicKey+".") {
+	if len(connects) != 2 || connects[0]["auth"] != "" || connects[1]["v"] != "1" {
 		t.Fatalf("connects: %v", connects)
 	}
 	if s.HubKey() != v.Keys["hub"].PublicKey || OpenHubKeys(pins).Get(hub.port) != v.Keys["hub"].PublicKey {

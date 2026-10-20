@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -105,16 +107,15 @@ type Service struct {
 	paths    map[string]struct{}
 	settings map[string]ApiSettings
 	sender   *channelgo.Sender
-	conn     *client.ClientSender
-	// generation counts connections; Stop bumps it so a pending reconnect
-	// doesn't restart a stopped service.
-	generation int
-	sign       func() (string, error)
-	key        ed25519.PrivateKey
-	hubKeys    *HubKeys
-	device     *deviceCertifier
-	onConnect  func(*channelgo.Sender)
-	mu         sync.Mutex
+	// noHubInfo is set when the hub answered hub/info with an error
+	// (hub-lite), so reconnects don't ask again.
+	noHubInfo bool
+	sign      func() (string, error)
+	key       ed25519.PrivateKey
+	hubKeys   *HubKeys
+	device    *deviceCertifier
+	onConnect func(*channelgo.Sender)
+	mu        sync.Mutex
 }
 
 // New creates a Service. Options are optional; the first one wins.
@@ -244,24 +245,15 @@ func (s *Service) startLocked() {
 	if s.sender != nil {
 		return
 	}
-	s.generation++
-	generation := s.generation
 	conn := client.Connect(s.ch, s.address, client.Options{
 		Headers: s.authHeaders,
 		OnConnect: func(sender *channelgo.Sender) {
-			if s.sign == nil && s.HubKey() == "" && s.learnHubKey(sender) {
-				// Register only on the hub-bound connection, so the hub never
-				// sees this service on v0 first.
-				go s.reconnect(generation)
-				return
-			}
 			s.sendUpdates(sender)
 			if s.onConnect != nil {
 				s.onConnect(sender)
 			}
 		},
 	})
-	s.conn = conn
 	s.sender = conn.Sender
 }
 
@@ -277,45 +269,90 @@ func (s *Service) ForgetHubKey() error {
 	return s.hubKeys.Forget(s.address)
 }
 
-// learnHubKey asks the hub for its key after a v0 connect and pins it,
-// reporting whether it did. hub-lite and older hubs don't answer hub/info and
-// stay on v0.
-func (s *Service) learnHubKey(sender *channelgo.Sender) bool {
-	value, err := sender.Send("hub/info", nil)
-	if err != nil {
-		return false
+// connectHubKey is the hub key for the next connect. With none pinned it
+// asks the hub first (hub/info on a short anonymous connection) and pins the
+// answer, so the service connects hub-bound (v1) from its first connect and
+// requests queued meanwhile go out on that connection. hub-lite and older
+// hubs don't answer hub/info and stay on v0.
+func (s *Service) connectHubKey() string {
+	if key := s.HubKey(); key != "" {
+		return key
 	}
-	var info struct {
-		Key string `json:"key"`
+	s.mu.Lock()
+	skip := s.noHubInfo
+	s.mu.Unlock()
+	if skip {
+		return ""
 	}
-	data, err := json.Marshal(value)
-	if err != nil || json.Unmarshal(data, &info) != nil || info.Key == "" {
-		return false
+	key, answered := probeHubKey(s.address, hubInfoTimeout)
+	if key == "" {
+		if answered {
+			s.mu.Lock()
+			s.noHubInfo = true
+			s.mu.Unlock()
+		}
+		return ""
 	}
-	if err := s.hubKeys.Pin(s.address, info.Key); err != nil {
+	if err := s.hubKeys.Pin(s.address, key); err != nil {
 		fmt.Fprintln(os.Stderr, "hub-service: pin hub key:", err)
-		return false
+		return ""
 	}
-	return true
+	return key
 }
 
-// reconnect replaces connection generation with a fresh connection, unless
-// the service was stopped or restarted meanwhile.
-func (s *Service) reconnect(generation int) {
-	s.mu.Lock()
-	if s.generation != generation || s.conn == nil {
-		s.mu.Unlock()
-		return
+// dialHost is the host:port the client dials for address.
+func dialHost(address any) string {
+	parsed, err := url.Parse(HubAddress(address))
+	if err != nil {
+		return ""
 	}
-	conn := s.conn
-	s.conn = nil
-	s.sender = nil
-	s.mu.Unlock()
-	conn.Stop()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.generation == generation {
-		s.startLocked()
+	if parsed.Port() != "" {
+		return parsed.Host
+	}
+	if parsed.Scheme == "wss" {
+		return net.JoinHostPort(parsed.Hostname(), "443")
+	}
+	return net.JoinHostPort(parsed.Hostname(), "80")
+}
+
+// hubInfoTimeout bounds the hub/info probe before a connect.
+const hubInfoTimeout = 5 * time.Second
+
+// probeHubKey asks the hub at address for its key. answered is true when the
+// hub responded at all (an error response means it has no hub/info).
+func probeHubKey(address any, timeout time.Duration) (key string, answered bool) {
+	// The client retries a refused connect forever; a hub that is down
+	// fails here at once.
+	dial, err := net.DialTimeout("tcp", dialHost(address), timeout)
+	if err != nil {
+		return "", false
+	}
+	dial.Close()
+	conn := client.Connect(channelgo.NewChannel(), address, client.Options{})
+	defer conn.Stop()
+	type result struct {
+		key      string
+		answered bool
+	}
+	done := make(chan result, 1)
+	go func() {
+		value, err := conn.Send("hub/info", nil)
+		if err != nil {
+			done <- result{answered: !strings.Contains(err.Error(), "disconnected")}
+			return
+		}
+		var info struct {
+			Key string `json:"key"`
+		}
+		data, _ := json.Marshal(value)
+		_ = json.Unmarshal(data, &info)
+		done <- result{key: info.Key, answered: true}
+	}()
+	select {
+	case r := <-done:
+		return r.key, r.answered
+	case <-time.After(timeout):
+		return "", false
 	}
 }
 
@@ -331,8 +368,7 @@ func (s *Service) Stop() {
 	s.mu.Lock()
 	sender := s.sender
 	s.sender = nil
-	s.conn = nil
-	s.generation++
+	s.noHubInfo = false
 	s.mu.Unlock()
 	if sender != nil {
 		sender.Stop()
@@ -358,7 +394,7 @@ func (s *Service) authHeaders() map[string]string {
 		fmt.Fprintln(os.Stderr, "hub-service: auth token:", err)
 		return nil
 	}
-	hubKey := s.HubKey()
+	hubKey := s.connectHubKey()
 	token, err := SignToken(private, hubKey, time.Now().Add(signExpiry))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hub-service: auth token:", err)
