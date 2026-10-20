@@ -2,17 +2,21 @@
 // host post/stream API endpoints, and call API through the hub.
 //
 // Port of hub-service (TS reference). Every (re)connect sends a fresh hub-pro
-// auth token from the keychain (see keychain.go); hub-lite ignores it.
+// auth token from the keychain (see keychain.go), bound to the hub's key once
+// it is known (see hubkeys.go); hub-lite ignores it.
 package hubservice
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/v57/channel-go/channelgo"
 	"github.com/v57/channel-go/client"
@@ -28,8 +32,19 @@ type ServiceOptions struct {
 	Name string
 	// Icon is the profile icon: a string or map[string]any{"symbol":..,"text":..}.
 	Icon any
-	// Sign returns the auth token sent on every connect. Default: Sign
-	// (the keychain's `auth` file).
+	// Key is the service key that signs auth tokens. Default: the keychain
+	// (`auth` in the working directory, or $HUBKEY).
+	Key ed25519.PrivateKey
+	// HubKeys is the `hubs.json` file that pins hub keys per address.
+	// Default: beside the keychain's key file; with Key set, pins stay in
+	// memory unless this is set.
+	HubKeys string
+	// HubKey is the hub's key when it is known up front (an invitation or
+	// config). It is pinned for Address.
+	HubKey string
+	// Sign replaces the SDK's signing: its token goes out with `v: 0` on every
+	// connect and the hub key is never learned. Default: nil (the SDK signs
+	// with Key).
 	Sign func() (string, error)
 	// OnConnect runs after every (re)connect, once the profile and service
 	// updates are queued. It runs on the connection's event loop: sends from
@@ -87,7 +102,11 @@ type Service struct {
 	paths     map[string]struct{}
 	settings  map[string]ApiSettings
 	sender    *channelgo.Sender
+	conn      *client.ClientSender
+	epoch     int
 	sign      func() (string, error)
+	key       ed25519.PrivateKey
+	hubKeys   *HubKeys
 	onConnect func(*channelgo.Sender)
 	mu        sync.Mutex
 }
@@ -104,10 +123,8 @@ func New(options ...ServiceOptions) *Service {
 		paths:     map[string]struct{}{},
 		settings:  map[string]ApiSettings{},
 		sign:      opts.Sign,
+		key:       opts.Key,
 		onConnect: opts.OnConnect,
-	}
-	if s.sign == nil {
-		s.sign = Sign
 	}
 	if opts.Address != nil {
 		s.address = opts.Address
@@ -115,6 +132,19 @@ func New(options ...ServiceOptions) *Service {
 		s.address = env
 	} else {
 		s.address = 1997
+	}
+	switch {
+	case opts.HubKeys != "":
+		s.hubKeys = OpenHubKeys(opts.HubKeys)
+	case opts.Key == nil && opts.Sign == nil:
+		s.hubKeys = OpenHubKeys(DefaultHubKeysPath())
+	default:
+		s.hubKeys = OpenHubKeys("")
+	}
+	if opts.HubKey != "" {
+		if err := s.hubKeys.Pin(s.address, opts.HubKey); err != nil {
+			fmt.Fprintln(os.Stderr, "hub-service: pin hub key:", err)
+		}
 	}
 	if opts.Name != "" || opts.Icon != nil {
 		s.profile = &Profile{Name: opts.Name, Icon: opts.Icon}
@@ -197,20 +227,83 @@ func (s *Service) Values(path string, body any, contextValue ...any) (*channelgo
 func (s *Service) Start() *Service {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.startLocked()
+	return s
+}
+
+func (s *Service) startLocked() {
 	if s.sender != nil {
-		return s
+		return
 	}
-	sender := client.Connect(s.ch, s.address, client.Options{
+	var conn *client.ClientSender
+	conn = client.Connect(s.ch, s.address, client.Options{
 		Headers: s.authHeaders,
 		OnConnect: func(sender *channelgo.Sender) {
 			s.sendUpdates(sender)
 			if s.onConnect != nil {
 				s.onConnect(sender)
 			}
+			if s.sign == nil && s.HubKey() == "" {
+				go s.learnHubKey(conn, sender)
+			}
 		},
 	})
-	s.sender = sender.Sender
-	return s
+	s.conn = conn
+	s.sender = conn.Sender
+}
+
+// HubKey is the hub's pinned key for this service's address, or "" while it
+// is unknown (the service then connects with v0 tokens).
+func (s *Service) HubKey() string {
+	return s.hubKeys.Get(s.address)
+}
+
+// ForgetHubKey clears the pinned hub key, for a hub whose key changed. The
+// next connect learns it again.
+func (s *Service) ForgetHubKey() error {
+	return s.hubKeys.Forget(s.address)
+}
+
+// learnHubKey asks the hub for its key after a v0 connect, pins it and
+// reconnects so the session uses hub-bound tokens. hub-lite and older hubs
+// don't answer hub/info and stay on v0.
+func (s *Service) learnHubKey(conn *client.ClientSender, sender *channelgo.Sender) {
+	value, err := sender.Send("hub/info", nil)
+	if err != nil {
+		return
+	}
+	var info struct {
+		Key string `json:"key"`
+	}
+	data, err := json.Marshal(value)
+	if err != nil || json.Unmarshal(data, &info) != nil || info.Key == "" {
+		return
+	}
+	if err := s.hubKeys.Pin(s.address, info.Key); err != nil {
+		fmt.Fprintln(os.Stderr, "hub-service: pin hub key:", err)
+		return
+	}
+	s.reconnect(conn)
+}
+
+// reconnect replaces conn with a fresh connection, unless the service was
+// stopped or restarted meanwhile.
+func (s *Service) reconnect(conn *client.ClientSender) {
+	s.mu.Lock()
+	if s.conn != conn {
+		s.mu.Unlock()
+		return
+	}
+	epoch := s.epoch
+	s.conn = nil
+	s.sender = nil
+	s.mu.Unlock()
+	conn.Stop()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.epoch == epoch {
+		s.startLocked()
+	}
 }
 
 // Sender returns the hub connection's sender, nil before Start and after Stop.
@@ -225,22 +318,50 @@ func (s *Service) Stop() {
 	s.mu.Lock()
 	sender := s.sender
 	s.sender = nil
+	s.conn = nil
+	s.epoch++
 	s.mu.Unlock()
 	if sender != nil {
 		sender.Stop()
 	}
 }
 
-// authHeaders signs a fresh token for each connect. If signing fails the
-// connection goes out without auth: hub-lite accepts it, hub-pro treats it as
-// an anonymous connection.
+// authHeaders signs a fresh token for each connect: bound to the hub (v1)
+// once its key is pinned, else v0. If signing fails the connection goes out
+// without auth: hub-lite accepts it, hub-pro treats it as an anonymous
+// connection.
 func (s *Service) authHeaders() map[string]string {
-	token, err := s.sign()
+	if s.sign != nil {
+		token, err := s.sign()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "hub-service: auth token:", err)
+			return nil
+		}
+		return map[string]string{"auth": token, "v": authVersion}
+	}
+	private, err := s.privateKey()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hub-service: auth token:", err)
 		return nil
 	}
-	return map[string]string{"auth": token, "v": authVersion}
+	hubKey := s.HubKey()
+	token, err := SignToken(private, hubKey, time.Now().Add(signExpiry))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "hub-service: auth token:", err)
+		return nil
+	}
+	version := authVersion
+	if hubKey != "" {
+		version = authVersionHub
+	}
+	return map[string]string{"auth": token, "v": version}
+}
+
+func (s *Service) privateKey() (ed25519.PrivateKey, error) {
+	if s.key != nil {
+		return s.key, nil
+	}
+	return keychainPrivateKey()
 }
 
 // update builds the current hub/service/update payload.

@@ -7,7 +7,8 @@ package hubservice
 //     DER public key.
 //   - A token is `key.<pub>.<sig>.<expiry>`: pub is the base64 SPKI public key,
 //     expiry the decimal Unix time in seconds, sig the base64 Ed25519 signature
-//     of the expiry string.
+//     of the expiry string (v0) or of `hub1:<hub SPKI>:<expiry>` (v1, bound to
+//     one hub; Docs/Devices/protocol.md section 2).
 //
 // hub-lite ignores the auth header.
 
@@ -28,10 +29,12 @@ import (
 const (
 	privateDerLength = 48
 	publicDerLength  = 44
-	// authVersion is sent as the `v` header next to `auth` (TS parity).
-	authVersion = "0"
-	// signExpiry matches the TS sign() default.
-	signExpiry = 10 * time.Second
+	// authVersion is sent as the `v` header next to `auth` for unbound
+	// tokens; authVersionHub for hub-bound ones.
+	authVersion    = "0"
+	authVersionHub = "1"
+	// signExpiry is the protocol's SDK default; hubs accept at most 300 s.
+	signExpiry = 60 * time.Second
 )
 
 type keychainKey struct {
@@ -64,20 +67,53 @@ func PublicKey() (string, error) {
 	return base64.StdEncoding.EncodeToString(key.publicDer), nil
 }
 
-// Sign returns a fresh auth token that expires in 10 seconds.
+// Sign returns a fresh v0 auth token that expires in 60 seconds.
 func Sign() (string, error) {
-	return signUntil(time.Now().Add(signExpiry))
+	return SignHub("")
 }
 
-func signUntil(expiry time.Time) (string, error) {
+// SignHub returns a fresh auth token bound to hubKey (v1), or an unbound v0
+// token when hubKey is empty. It expires in 60 seconds.
+func SignHub(hubKey string) (string, error) {
 	key, err := loadKey()
 	if err != nil {
 		return "", err
 	}
+	return SignToken(key.private, hubKey, time.Now().Add(signExpiry))
+}
+
+// SignToken signs an auth token with a service key: v1 (`hub1:<hubKey>:<expiry>`)
+// when hubKey is set, else v0 (`<expiry>`).
+func SignToken(private ed25519.PrivateKey, hubKey string, expiry time.Time) (string, error) {
+	publicDer, err := x509.MarshalPKIXPublicKey(private.Public())
+	if err != nil {
+		return "", err
+	}
 	data := strconv.FormatInt(expiry.Unix(), 10)
-	signature := ed25519.Sign(key.private, []byte(data))
-	return "key." + base64.StdEncoding.EncodeToString(key.publicDer) + "." +
+	signed := data
+	if hubKey != "" {
+		signed = "hub1:" + hubKey + ":" + data
+	}
+	signature := ed25519.Sign(private, []byte(signed))
+	return "key." + base64.StdEncoding.EncodeToString(publicDer) + "." +
 		base64.StdEncoding.EncodeToString(signature) + "." + data, nil
+}
+
+// KeyFromFile parses key file text (keychain layout) into a private key.
+func KeyFromFile(text string) (ed25519.PrivateKey, error) {
+	key, err := parseKey(strings.TrimSpace(text))
+	if err != nil {
+		return nil, err
+	}
+	return key.private, nil
+}
+
+func keychainPrivateKey() (ed25519.PrivateKey, error) {
+	key, err := loadKey()
+	if err != nil {
+		return nil, err
+	}
+	return key.private, nil
 }
 
 func keyPath() string {

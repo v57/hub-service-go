@@ -62,21 +62,32 @@ func TestSignTokenVerifies(t *testing.T) {
 	if len(parts) != 4 || parts[0] != "key" {
 		t.Fatalf("token shape: %q", token)
 	}
+	verifyToken(t, token, "")
+}
+
+// verifyToken checks a token's signature over prefix+expiry and that it
+// expires about 60 seconds from now.
+func verifyToken(t *testing.T, token, prefix string) {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 4 || parts[0] != "key" {
+		t.Fatalf("token shape: %q", token)
+	}
 	publicDer, _ := base64.StdEncoding.DecodeString(parts[1])
 	parsed, err := x509.ParsePKIXPublicKey(publicDer)
 	if err != nil {
 		t.Fatal(err)
 	}
 	signature, _ := base64.StdEncoding.DecodeString(parts[2])
-	if !ed25519.Verify(parsed.(ed25519.PublicKey), []byte(parts[3]), signature) {
+	if !ed25519.Verify(parsed.(ed25519.PublicKey), []byte(prefix+parts[3]), signature) {
 		t.Fatal("signature does not verify")
 	}
 	expiry, err := strconv.ParseInt(parts[3], 10, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if left := time.Until(time.Unix(expiry, 0)); left < 8*time.Second || left > 11*time.Second {
-		t.Fatalf("expiry %v from now, want about 10s", left)
+	if left := time.Until(time.Unix(expiry, 0)); left < 55*time.Second || left > 61*time.Second {
+		t.Fatalf("expiry %v from now, want about 60s", left)
 	}
 }
 
