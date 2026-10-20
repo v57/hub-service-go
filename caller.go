@@ -50,7 +50,8 @@ func (c *Caller) InGroup(group string) bool {
 // Request is one call handed to a handler.
 type Request struct {
 	Body any
-	// Caller is nil when the hub sent no caller (hub-lite, older hub-pro).
+	// Caller is nil when the hub sent none (hub-lite, older hub-pro) or the
+	// context's hub key isn't the pinned one.
 	Caller *Caller
 	// HubKey is the forwarding hub's key, when it sent one.
 	HubKey string
@@ -59,7 +60,8 @@ type Request struct {
 	Context any
 }
 
-// RequestFrom reads the hub's caller identity out of a request context.
+// RequestFrom reads the hub's caller identity out of a request context. It
+// doesn't check the hub key; PostRequest and StreamRequest do.
 func RequestFrom(body any, contextValue any) Request {
 	request := Request{Body: body, Context: contextValue}
 	values, ok := contextValue.(map[string]any)
@@ -83,11 +85,23 @@ func RequestFrom(body any, contextValue any) Request {
 	return request
 }
 
-// PostRequest registers a request/response API whose handler sees the caller.
+// request is RequestFrom with the caller kept only when the context names the
+// pinned hub key: hub-lite forwards a client's own context.hub unchanged, so
+// an unpinned or other hub's caller can't be trusted.
+func (s *Service) request(body channelgo.Body) Request {
+	request := RequestFrom(body.Body, body.Context)
+	if request.HubKey == "" || request.HubKey != s.HubKey() {
+		request.Caller = nil
+	}
+	return request
+}
+
+// PostRequest registers a request/response API whose handler sees the
+// caller. Caller is set only on hubs whose key is pinned (hub-pro).
 func (s *Service) PostRequest(path string, handler func(request Request) (any, error), settings ...ApiSettings) *Service {
 	s.addPath(path, settings)
 	s.ch.Post(path, func(body channelgo.Body) (any, error) {
-		return handler(RequestFrom(body.Body, body.Context))
+		return handler(s.request(body))
 	})
 	return s
 }
@@ -102,7 +116,7 @@ func (s *Service) StreamRequest(path string, handler func(ctx context.Context, r
 		if body.Task != nil {
 			body.Task.OnCancel(cancel)
 		}
-		return handler(ctx, RequestFrom(body.Body, body.Context), emit.Emit)
+		return handler(ctx, s.request(body), emit.Emit)
 	})
 	return s
 }

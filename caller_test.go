@@ -61,9 +61,10 @@ func TestHandlersSeeCallerThroughHub(t *testing.T) {
 		}
 		return nil, nil
 	})
+	hubKey := loadVectors(t).Keys["hub"].PublicKey
 	callerContext := map[string]any{"hub": map[string]any{
 		"caller": map[string]any{"key": "K", "device": map[string]any{"id": "D", "name": "Phone"}, "groups": []any{"g"}},
-		"hubKey": "H",
+		"hubKey": hubKey,
 	}}
 	hub.Post("probe", func(body channelgo.Body) (any, error) {
 		post, err := service.Send("whoami", nil, callerContext)
@@ -82,12 +83,13 @@ func TestHandlersSeeCallerThroughHub(t *testing.T) {
 	})
 	port := testHub(t, hub)
 
-	s := New(ServiceOptions{Address: port, Sign: noSign})
+	private, _ := KeyFromFile(loadVectors(t).Keys["service"].KeyFile)
+	s := New(ServiceOptions{Address: port, Key: private, HubKey: hubKey, Device: DeviceOptions{Disabled: true}})
 	describe := func(request Request) any {
 		if request.Caller == nil || request.Caller.Device == nil {
 			return "no caller"
 		}
-		return request.Caller.Key + "@" + request.Caller.Device.Name + "/" + request.HubKey
+		return request.Caller.Key + "@" + request.Caller.Device.Name
 	}
 	s.PostRequest("whoami", func(request Request) (any, error) { return describe(request), nil })
 	s.StreamRequest("whoami/stream", func(ctx context.Context, request Request, emit func(any) error) error {
@@ -112,7 +114,18 @@ func TestHandlersSeeCallerThroughHub(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	results, _ := value.([]any)
-	if err != nil || len(results) != 2 || results[0] != "K@Phone/H" || results[1] != "K@Phone/H" {
+	if err != nil || len(results) != 2 || results[0] != "K@Phone" || results[1] != "K@Phone" {
 		t.Fatalf("probe = %v, %v", value, err)
+	}
+
+	// A caller under another hub key (or none pinned) isn't trusted.
+	if err := s.ForgetHubKey(); err != nil {
+		t.Fatal(err)
+	}
+	if value, err = caller.Send("probe", nil); err != nil {
+		t.Fatal(err)
+	}
+	if results, _ := value.([]any); len(results) != 2 || results[0] != "no caller" || results[1] != "no caller" {
+		t.Fatalf("unpinned probe = %v", value)
 	}
 }
