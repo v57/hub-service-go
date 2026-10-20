@@ -69,6 +69,11 @@ response, _ := service.Send("echo/upper", "hello") // "HELLO"
   (custom v0 token factory; turns off hub key pinning)
 - `Post(path, handler func(body any) (any, error), settings ...ApiSettings) *Service`
 - `Stream(path, handler func(body any, emit func(any) error) error, settings ...ApiSettings) *Service`
+- `PostRequest(path, handler func(Request) (any, error), settings...)` and
+  `StreamRequest(path, handler func(ctx, Request, emit) error, settings...)` —
+  handlers that see `Request.Caller` (key, device, groups, owner) and
+  `Request.HubKey` from the hub's `context.hub`; `Caller` is nil on hubs that
+  send none (hub-lite)
 - `App(app App) *Service`
 - `Send(path, body, context...) (any, error)` — client call through the hub
 - `Values(path, body, context...) (*channelgo.Values, error)` — stream call
