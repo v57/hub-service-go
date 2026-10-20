@@ -102,17 +102,19 @@ type Service struct {
 	apps    []AppHeader
 	// paths tracks every registered handler path (post, stream, app) in
 	// registration-independent order; used to build the services list.
-	paths     map[string]struct{}
-	settings  map[string]ApiSettings
-	sender    *channelgo.Sender
-	conn      *client.ClientSender
-	epoch     int
-	sign      func() (string, error)
-	key       ed25519.PrivateKey
-	hubKeys   *HubKeys
-	device    *deviceCertifier
-	onConnect func(*channelgo.Sender)
-	mu        sync.Mutex
+	paths    map[string]struct{}
+	settings map[string]ApiSettings
+	sender   *channelgo.Sender
+	conn     *client.ClientSender
+	// generation counts connections; Stop bumps it so a pending reconnect
+	// doesn't restart a stopped service.
+	generation int
+	sign       func() (string, error)
+	key        ed25519.PrivateKey
+	hubKeys    *HubKeys
+	device     *deviceCertifier
+	onConnect  func(*channelgo.Sender)
+	mu         sync.Mutex
 }
 
 // New creates a Service. Options are optional; the first one wins.
@@ -242,16 +244,20 @@ func (s *Service) startLocked() {
 	if s.sender != nil {
 		return
 	}
-	var conn *client.ClientSender
-	conn = client.Connect(s.ch, s.address, client.Options{
+	s.generation++
+	generation := s.generation
+	conn := client.Connect(s.ch, s.address, client.Options{
 		Headers: s.authHeaders,
 		OnConnect: func(sender *channelgo.Sender) {
+			if s.sign == nil && s.HubKey() == "" && s.learnHubKey(sender) {
+				// Register only on the hub-bound connection, so the hub never
+				// sees this service on v0 first.
+				go s.reconnect(generation)
+				return
+			}
 			s.sendUpdates(sender)
 			if s.onConnect != nil {
 				s.onConnect(sender)
-			}
-			if s.sign == nil && s.HubKey() == "" {
-				go s.learnHubKey(conn, sender)
 			}
 		},
 	})
@@ -271,44 +277,44 @@ func (s *Service) ForgetHubKey() error {
 	return s.hubKeys.Forget(s.address)
 }
 
-// learnHubKey asks the hub for its key after a v0 connect, pins it and
-// reconnects so the session uses hub-bound tokens. hub-lite and older hubs
-// don't answer hub/info and stay on v0.
-func (s *Service) learnHubKey(conn *client.ClientSender, sender *channelgo.Sender) {
+// learnHubKey asks the hub for its key after a v0 connect and pins it,
+// reporting whether it did. hub-lite and older hubs don't answer hub/info and
+// stay on v0.
+func (s *Service) learnHubKey(sender *channelgo.Sender) bool {
 	value, err := sender.Send("hub/info", nil)
 	if err != nil {
-		return
+		return false
 	}
 	var info struct {
 		Key string `json:"key"`
 	}
 	data, err := json.Marshal(value)
 	if err != nil || json.Unmarshal(data, &info) != nil || info.Key == "" {
-		return
+		return false
 	}
 	if err := s.hubKeys.Pin(s.address, info.Key); err != nil {
 		fmt.Fprintln(os.Stderr, "hub-service: pin hub key:", err)
-		return
+		return false
 	}
-	s.reconnect(conn)
+	return true
 }
 
-// reconnect replaces conn with a fresh connection, unless the service was
-// stopped or restarted meanwhile.
-func (s *Service) reconnect(conn *client.ClientSender) {
+// reconnect replaces connection generation with a fresh connection, unless
+// the service was stopped or restarted meanwhile.
+func (s *Service) reconnect(generation int) {
 	s.mu.Lock()
-	if s.conn != conn {
+	if s.generation != generation || s.conn == nil {
 		s.mu.Unlock()
 		return
 	}
-	epoch := s.epoch
+	conn := s.conn
 	s.conn = nil
 	s.sender = nil
 	s.mu.Unlock()
 	conn.Stop()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.epoch == epoch {
+	if s.generation == generation {
 		s.startLocked()
 	}
 }
@@ -326,7 +332,7 @@ func (s *Service) Stop() {
 	sender := s.sender
 	s.sender = nil
 	s.conn = nil
-	s.epoch++
+	s.generation++
 	s.mu.Unlock()
 	if sender != nil {
 		sender.Stop()

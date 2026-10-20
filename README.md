@@ -95,9 +95,9 @@ segment, TS parity) and `Limit` — wire-parity fields that hub-lite ignores.
 
 A v1 token signs `hub1:<hub key>:<expiry>`, so it only works on the hub it was
 made for (`Docs/Devices/protocol.md`). On its first connect to a hub the
-service connects with v0, asks `hub/info` for the hub's key, pins it in
+service connects with v0 and only asks `hub/info` for the hub's key; it pins it in
 `hubs.json` beside the key file (`{ "ws://host:port": "<hub SPKI>" }`) and
-reconnects with v1. hub-lite doesn't answer `hub/info`, so services stay on
+reconnects with v1 before registering anything. hub-lite doesn't answer `hub/info`, so services stay on
 v0 there. A pinned hub that refuses the token is reported, never silently
 downgraded; `ForgetHubKey` clears the pin.
 

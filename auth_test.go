@@ -175,15 +175,19 @@ func TestServiceLearnsHubKeyAndReconnectsWithV1(t *testing.T) {
 	s.Start()
 	defer s.Stop()
 
-	first := hub.next(t)
-	if first["v"] != "0" || !strings.HasPrefix(first["auth"], "key."+v.Keys["service"].PublicKey+".") {
-		t.Fatalf("first connect headers: %v", first)
+	// The first (v0) connection only learns the key; the service registers
+	// on the hub-bound one.
+	registered := hub.next(t)
+	if registered["v"] != "1" {
+		t.Fatalf("registered connect headers: %v", registered)
 	}
-	second := hub.next(t)
-	if second["v"] != "1" {
-		t.Fatalf("second connect headers: %v", second)
+	verifyToken(t, registered["auth"], "hub1:"+v.Keys["hub"].PublicKey+":")
+	hub.mu.Lock()
+	connects := append([]map[string]string(nil), hub.headers...)
+	hub.mu.Unlock()
+	if len(connects) != 2 || connects[0]["v"] != "0" || !strings.HasPrefix(connects[0]["auth"], "key."+v.Keys["service"].PublicKey+".") {
+		t.Fatalf("connects: %v", connects)
 	}
-	verifyToken(t, second["auth"], "hub1:"+v.Keys["hub"].PublicKey+":")
 	if s.HubKey() != v.Keys["hub"].PublicKey || OpenHubKeys(pins).Get(hub.port) != v.Keys["hub"].PublicKey {
 		t.Fatalf("hub key not pinned: %q", s.HubKey())
 	}
