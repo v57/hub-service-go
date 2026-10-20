@@ -73,8 +73,9 @@ response, _ := service.Send("echo/upper", "hello") // "HELLO"
 - `PostRequest(path, handler func(Request) (any, error), settings...)` and
   `StreamRequest(path, handler func(ctx, Request, emit) error, settings...)` —
   handlers that see `Request.Caller` (key, device, groups, owner) and
-  `Request.HubKey` from the hub's `context.hub`; `Caller` is nil on hubs that
-  send none (hub-lite)
+  `Request.HubKey` from the hub's `context.hub`; `Caller` is set only when the
+  context names the pinned hub key, so it is nil on hub-lite (which forwards a
+  client's own context) and on hubs that send none
 - `App(app App) *Service`
 - `Send(path, body, context...) (any, error)` — client call through the hub
 - `Values(path, body, context...) (*channelgo.Values, error)` — stream call
@@ -96,7 +97,9 @@ segment, TS parity) and `Limit` — wire-parity fields that hub-lite ignores.
 A v1 token signs `hub1:<hub key>:<expiry>`, so it only works on the hub it was
 made for (`Docs/Devices/protocol.md`). On its first connect to a hub the
 service connects with v0 and only asks `hub/info` for the hub's key. It pins
-the key in `hubs.json` beside the key file (`{ "ws://host:port": "<hub SPKI>" }`)
+the key in `hubs.json` beside the key file (`{ "ws://localhost:1997": "<hub SPKI>" }`;
+a bare port pins as `ws://localhost:<port>`, URLs with lowercased scheme and
+host and no trailing slash)
 and reconnects with v1 before registering anything. hub-lite doesn't answer
 `hub/info`, so services stay on v0 there. A pinned hub that refuses the token
 is reported, never silently downgraded; `ForgetHubKey` clears the pin.
@@ -113,7 +116,8 @@ else stays a plain key connection.
   else `~/.hub/device.key` (created on first use, 0600, same layout as `auth`).
   `LoadDeviceKey`, `SetDeviceKeyPath`, `DeviceKey.ID()` and `SafetyCode()`.
 - `DeviceOptions`: `Disabled`, `Key`, `Instance` (default the service `Name`,
-  else the program name), `Name` (default the host name), `Platform`,
+  else the working directory's name, else `service`), `Name` (default the
+  macOS computer name, else the host name without `.local`), `Platform`,
   `Parent` (for containers and VMs), `Lifetime` (at most and by default 7
   days). Certificates are renewed at connect with less than a day left.
 

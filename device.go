@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -282,10 +283,11 @@ type DeviceOptions struct {
 	// Key is the device key. Default: LoadDeviceKey.
 	Key *DeviceKey
 	// Instance names this service on its device, unique per device
-	// (`s3-local/Backup Disk`). Default: the service Name, else the program
-	// name.
+	// (`s3-local/Backup Disk`). Default: the service Name, else the working
+	// directory's name, else "service".
 	Instance string
-	// Name is the suggested device name. Default: the host name.
+	// Name is the suggested device name. Default: the computer name on
+	// macOS, else the host name without `.local`.
 	Name string
 	// Platform defaults to the OS (`macos`, `linux`, ...).
 	Platform string
@@ -311,7 +313,12 @@ func newDeviceCertifier(options DeviceOptions, serviceName string) *deviceCertif
 		options.Instance = serviceName
 	}
 	if options.Instance == "" {
-		options.Instance = filepath.Base(os.Args[0])
+		if dir, err := os.Getwd(); err == nil && filepath.Base(dir) != "/" && filepath.Base(dir) != "." {
+			options.Instance = filepath.Base(dir)
+		}
+	}
+	if options.Instance == "" {
+		options.Instance = "service"
 	}
 	if options.Name == "" {
 		options.Name = hostDeviceName()
@@ -362,6 +369,13 @@ func (d *deviceCertifier) certificate(serviceKey string) (string, error) {
 }
 
 func hostDeviceName() string {
+	if runtime.GOOS == "darwin" {
+		if output, err := exec.Command("scutil", "--get", "ComputerName").Output(); err == nil {
+			if name := strings.TrimSpace(string(output)); name != "" {
+				return name
+			}
+		}
+	}
 	name, err := os.Hostname()
 	if err != nil {
 		return ""

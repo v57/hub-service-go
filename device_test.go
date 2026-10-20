@@ -192,8 +192,13 @@ func TestServiceSendsDeviceHeader(t *testing.T) {
 	}
 	named := New(ServiceOptions{Key: private, Name: "Echo"})
 	certificate, err = VerifyCertificate(named.authHeaders()["device"])
-	if err != nil || certificate.Instance != "Echo" {
+	if err != nil || certificate.Instance != "Echo" || certificate.DeviceName == "" {
 		t.Fatalf("default instance: %+v %v", certificate, err)
+	}
+	unnamed := New(ServiceOptions{Key: private})
+	certificate, err = VerifyCertificate(unnamed.authHeaders()["device"])
+	if dir, _ := os.Getwd(); err != nil || certificate.Instance != filepath.Base(dir) {
+		t.Fatalf("instance without a name: %+v %v", certificate, err)
 	}
 	if path, _ := DeviceKeyPath(); !strings.HasPrefix(path, os.TempDir()) && !strings.Contains(path, "hub-service-go-device-") {
 		t.Fatalf("test device key outside the temp dir: %s", path)
