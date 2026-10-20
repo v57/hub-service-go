@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -115,23 +116,34 @@ func (h *HubKeys) loadLocked() (map[string]string, error) {
 	return pins, nil
 }
 
-// HubAddress is the form a hub address is pinned under: the WebSocket URL the
-// client dials (`1997` and `ws://127.0.0.1:1997` are the same hub).
+// HubAddress is the form a hub address is pinned under
+// (Docs/Devices/protocol.md section 2): a bare port becomes
+// `ws://localhost:<port>`; otherwise the URL dialled, with lowercased scheme
+// and host and no trailing slash.
 func HubAddress(address any) string {
+	var dialled string
 	switch value := address.(type) {
 	case int:
-		return fmt.Sprintf("ws://127.0.0.1:%d", value)
+		return fmt.Sprintf("ws://localhost:%d", value)
 	case string:
-		if strings.HasPrefix(value, "ws://") || strings.HasPrefix(value, "wss://") {
-			return value
+		value = strings.TrimSpace(value)
+		if port, err := strconv.Atoi(value); err == nil {
+			return fmt.Sprintf("ws://localhost:%d", port)
 		}
-		if strings.Contains(value, ":") {
-			return "ws://" + value
+		if !strings.Contains(value, "://") {
+			value = "ws://" + value
 		}
-		return "ws://127.0.0.1:" + value
+		dialled = value
 	default:
 		return fmt.Sprint(value)
 	}
+	scheme, rest, _ := strings.Cut(dialled, "://")
+	host, path, hasPath := strings.Cut(rest, "/")
+	normalized := strings.ToLower(scheme) + "://" + strings.ToLower(host)
+	if hasPath {
+		normalized += "/" + path
+	}
+	return strings.TrimRight(normalized, "/")
 }
 
 func parseSPKI(encoded string) (ed25519.PublicKey, error) {

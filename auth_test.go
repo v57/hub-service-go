@@ -79,7 +79,7 @@ func TestHubKeysPinPerAddress(t *testing.T) {
 	if err := pins.Pin(1997, v.Keys["hub"].PublicKey); err != nil {
 		t.Fatal(err)
 	}
-	if got := OpenHubKeys(path).Get("ws://127.0.0.1:1997"); got != v.Keys["hub"].PublicKey {
+	if got := OpenHubKeys(path).Get("ws://localhost:1997"); got != v.Keys["hub"].PublicKey {
 		t.Fatalf("pin by URL = %q", got)
 	}
 	if got := pins.Get("127.0.0.1:1998"); got != "" {
@@ -87,7 +87,7 @@ func TestHubKeysPinPerAddress(t *testing.T) {
 	}
 	data, _ := os.ReadFile(path)
 	var stored map[string]string
-	if err := json.Unmarshal(data, &stored); err != nil || stored["ws://127.0.0.1:1997"] != v.Keys["hub"].PublicKey {
+	if err := json.Unmarshal(data, &stored); err != nil || stored["ws://localhost:1997"] != v.Keys["hub"].PublicKey {
 		t.Fatalf("hubs.json = %s (%v)", data, err)
 	}
 	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
@@ -98,6 +98,20 @@ func TestHubKeysPinPerAddress(t *testing.T) {
 	}
 	if err := pins.Forget(1997); err != nil || pins.Get(1997) != "" {
 		t.Fatalf("forget: %v", err)
+	}
+}
+
+func TestHubAddressNormalization(t *testing.T) {
+	for input, want := range map[any]string{
+		1997:                       "ws://localhost:1997",
+		"1997":                     "ws://localhost:1997",
+		"Hub.Local:1997":           "ws://hub.local:1997",
+		"WSS://Hub.Example.com/":   "wss://hub.example.com",
+		"ws://10.0.0.2:1997/Path/": "ws://10.0.0.2:1997/Path",
+	} {
+		if got := HubAddress(input); got != want {
+			t.Errorf("HubAddress(%v) = %q, want %q", input, got, want)
+		}
 	}
 }
 
