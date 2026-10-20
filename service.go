@@ -46,6 +46,9 @@ type ServiceOptions struct {
 	// connect and the hub key is never learned. Default: nil (the SDK signs
 	// with Key).
 	Sign func() (string, error)
+	// Device certifies the service key with this device's key on every
+	// connect (the `device` header). On by default; ignored with Sign.
+	Device DeviceOptions
 	// OnConnect runs after every (re)connect, once the profile and service
 	// updates are queued. It runs on the connection's event loop: sends from
 	// it work, and a sender kept for later is safe to use from any goroutine.
@@ -107,6 +110,7 @@ type Service struct {
 	sign      func() (string, error)
 	key       ed25519.PrivateKey
 	hubKeys   *HubKeys
+	device    *deviceCertifier
 	onConnect func(*channelgo.Sender)
 	mu        sync.Mutex
 }
@@ -140,6 +144,9 @@ func New(options ...ServiceOptions) *Service {
 		s.hubKeys = OpenHubKeys(DefaultHubKeysPath())
 	default:
 		s.hubKeys = OpenHubKeys("")
+	}
+	if opts.Sign == nil && !opts.Device.Disabled {
+		s.device = newDeviceCertifier(opts.Device, opts.Name)
 	}
 	if opts.HubKey != "" {
 		if err := s.hubKeys.Pin(s.address, opts.HubKey); err != nil {
@@ -327,9 +334,10 @@ func (s *Service) Stop() {
 }
 
 // authHeaders signs a fresh token for each connect: bound to the hub (v1)
-// once its key is pinned, else v0. If signing fails the connection goes out
-// without auth: hub-lite accepts it, hub-pro treats it as an anonymous
-// connection.
+// once its key is pinned, else v0, plus the device certificate. If signing
+// fails the connection goes out without auth: hub-lite accepts it, hub-pro
+// treats it as an anonymous connection. Without a certificate it is a plain
+// key connection.
 func (s *Service) authHeaders() map[string]string {
 	if s.sign != nil {
 		token, err := s.sign()
@@ -354,7 +362,16 @@ func (s *Service) authHeaders() map[string]string {
 	if hubKey != "" {
 		version = authVersionHub
 	}
-	return map[string]string{"auth": token, "v": version}
+	headers := map[string]string{"auth": token, "v": version}
+	if s.device != nil {
+		serviceKey, _, _ := strings.Cut(strings.TrimPrefix(token, "key."), ".")
+		if certificate, err := s.device.certificate(serviceKey); err != nil {
+			fmt.Fprintln(os.Stderr, "hub-service: device certificate:", err)
+		} else {
+			headers["device"] = certificate
+		}
+	}
+	return headers
 }
 
 func (s *Service) privateKey() (ed25519.PrivateKey, error) {

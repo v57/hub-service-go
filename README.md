@@ -66,7 +66,8 @@ response, _ := service.Send("echo/upper", "hello") // "HELLO"
 - `New(options ...ServiceOptions)` — `Address` (port or ws:// URL; default
   `1997` or `$HUB`), `Name`, `Icon`, `Key` (service key; default the
   keychain), `HubKeys` (pin file), `HubKey` (hub key known up front), `Sign`
-  (custom v0 token factory; turns off hub key pinning)
+  (custom v0 token factory; turns off hub key pinning and device mode),
+  `Device` (device mode options)
 - `Post(path, handler func(body any) (any, error), settings ...ApiSettings) *Service`
 - `Stream(path, handler func(body any, emit func(any) error) error, settings ...ApiSettings) *Service`
 - `PostRequest(path, handler func(Request) (any, error), settings...)` and
@@ -99,6 +100,22 @@ service connects with v0, asks `hub/info` for the hub's key, pins it in
 reconnects with v1. hub-lite doesn't answer `hub/info`, so services stay on
 v0 there. A pinned hub that refuses the token is reported, never silently
 downgraded; `ForgetHubKey` clears the pin.
+
+## Devices
+
+A device is one OS instance with its own Ed25519 key. On every connect the
+service sends a `device` header next to `auth`: a certificate, signed by the
+device key, saying this service key runs on this device under an instance
+name. A hub that approved the device attaches the connection to it; anything
+else stays a plain key connection.
+
+- Device key: `$HUB_DEVICE_KEY`, else `/var/lib/hub/device.key` for uid 0,
+  else `~/.hub/device.key` (created on first use, 0600, same layout as `auth`).
+  `LoadDeviceKey`, `SetDeviceKeyPath`, `DeviceKey.ID()` and `SafetyCode()`.
+- `DeviceOptions`: `Disabled`, `Key`, `Instance` (default the service `Name`,
+  else the program name), `Name` (default the host name), `Platform`,
+  `Parent` (for containers and VMs), `Lifetime` (at most and by default 7
+  days). Certificates are renewed at connect with less than a day left.
 
 ## Test
 
