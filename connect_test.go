@@ -11,7 +11,7 @@ import (
 	"github.com/v57/channel-go/server"
 )
 
-// testHub is a channel-go server standing in for hub-pro.
+// testHub is a channel-go server standing in for hub-server.
 func testHub(t *testing.T, ch *channelgo.Channel) int {
 	t.Helper()
 	srv, err := server.Listen(ch, 0, server.Options{})

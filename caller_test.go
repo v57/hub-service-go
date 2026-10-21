@@ -47,7 +47,7 @@ func TestRequestFromMergedHub(t *testing.T) {
 
 func TestHandlersSeeCallerThroughHub(t *testing.T) {
 	// The test hub forwards a call to the service with a caller context, as
-	// hub-pro does.
+	// hub-server does.
 	hub := channelgo.NewChannel()
 	var service *channelgo.Sender // set and used on the hub's loop only
 	ready := make(chan struct{}, 1)

@@ -1,7 +1,7 @@
-// Package hubservice lets a Go process connect to a hub (hub-lite/hub-pro),
+// Package hubservice lets a Go process connect to a hub (hub-lite/hub-server),
 // host post/stream API endpoints, and call API through the hub.
 //
-// Port of hub-service (TS reference). Every (re)connect sends a fresh hub-pro
+// Port of hub-service (TS reference). Every (re)connect sends a fresh hub-server
 // auth token from the keychain (see keychain.go), bound to the hub's key once
 // it is known (see hubkeys.go); hub-lite ignores it.
 package hubservice
@@ -377,7 +377,7 @@ func (s *Service) Stop() {
 
 // authHeaders signs a fresh token for each connect: bound to the hub (v1)
 // once its key is pinned, else v0, plus the device certificate. If signing
-// fails the connection goes out without auth: hub-lite accepts it, hub-pro
+// fails the connection goes out without auth: hub-lite accepts it, hub-server
 // treats it as an anonymous connection. Without a certificate it is a plain
 // key connection.
 func (s *Service) authHeaders() map[string]string {

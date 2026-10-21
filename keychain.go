@@ -1,6 +1,6 @@
 package hubservice
 
-// Ed25519 keychain for hub-pro auth. Wire parity with hub-service/keychain.ts:
+// Ed25519 keychain for hub-server auth. Wire parity with hub-service/keychain.ts:
 //
 //   - The key file (`auth` in the working directory, or $HUBKEY) holds the
 //     base64 of the 48-byte PKCS8 DER private key followed by the 44-byte SPKI
@@ -58,7 +58,7 @@ func SetKeyPath(path string) {
 }
 
 // PublicKey returns the service's public key: base64 of the SPKI DER public
-// key. Hub Pro uses it as the connection identity.
+// key. Hub Server uses it as the connection identity.
 func PublicKey() (string, error) {
 	key, err := loadKey()
 	if err != nil {

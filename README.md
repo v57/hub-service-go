@@ -7,7 +7,7 @@ Go port of [hub-service](https://github.com/v57/hub-service) — connect to a
 [hub](https://github.com/v57/hub-lite) (default `ws://127.0.0.1:1997`), host
 your own post/stream API endpoints, register apps, and call API through the hub.
 
-Works with hub-lite and hub-pro: every (re)connect sends a fresh hub-pro auth
+Works with hub-lite and hub-server: every (re)connect sends a fresh hub-server auth
 token signed with the service's Ed25519 key (hub-lite ignores it). The wire
 contract matches the TS reference (`hub/profile/update`, `hub/service/update`,
 AppInterface + element DSL).
@@ -85,7 +85,7 @@ response, _ := service.Send("echo/upper", "hello") // "HELLO"
 - `Sign() (string, error)` — fresh v0 `key.<pub>.<sig>.<expiry>` token (60 s);
   `SignHub(hubKey)` and `SignToken(key, hubKey, expiry)` sign v1 tokens
 - `PublicKey() (string, error)` — the service's SPKI public key (base64), its
-  hub-pro identity
+  hub-server identity
 - `SetKeyPath(path)` — key file location (default `$HUBKEY`, else `auth` in
   the cwd; created on first use, same format as the TS keychain)
 

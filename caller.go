@@ -1,6 +1,6 @@
 package hubservice
 
-// Caller identity (Docs/Devices/protocol.md section 4). hub-pro replaces any
+// Caller identity (Docs/Devices/protocol.md section 4). hub-server replaces any
 // client-supplied `context.hub` and forwards each request with
 // `{ "hub": { "caller": {...}, "hubKey": "<hub SPKI>" } }`. Services only take
 // requests from their hub connection, so they can trust it.
@@ -97,7 +97,7 @@ func (s *Service) request(body channelgo.Body) Request {
 }
 
 // PostRequest registers a request/response API whose handler sees the
-// caller. Caller is set only on hubs whose key is pinned (hub-pro).
+// caller. Caller is set only on hubs whose key is pinned (hub-server).
 func (s *Service) PostRequest(path string, handler func(request Request) (any, error), settings ...ApiSettings) *Service {
 	s.addPath(path, settings)
 	s.ch.Post(path, func(body channelgo.Body) (any, error) {
