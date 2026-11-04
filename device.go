@@ -187,9 +187,16 @@ func (k *DeviceKey) ID() string {
 }
 
 // SafetyCode is the "ddd ddd" code shown on the device and the approving
-// device so an owner can check they approve the right one.
-func (k *DeviceKey) SafetyCode() string {
-	sum := sha256.Sum256(k.publicDer)
+// device so an owner can check they approve the right one. hubKey is the key
+// this side pinned, codeValue what the hub picked after it had the device's
+// key (hub/device/request).
+func (k *DeviceKey) SafetyCode(hubKey, codeValue string) string {
+	return SafetyCode(hubKey, k.PublicKey(), codeValue)
+}
+
+// SafetyCode computes the code for any device key.
+func SafetyCode(hubKey, deviceKey, codeValue string) string {
+	sum := sha256.Sum256([]byte("hubcode1:" + hubKey + ":" + deviceKey + ":" + codeValue))
 	n, _ := strconv.ParseUint(hex.EncodeToString(sum[:4]), 16, 64)
 	code := fmt.Sprintf("%06d", n%1000000)
 	return code[:3] + " " + code[3:]

@@ -22,8 +22,15 @@ type vectors struct {
 		KeyFile    string `json:"keyFile"`
 		PublicKey  string `json:"publicKey"`
 		DeviceID   string `json:"deviceId"`
-		SafetyCode string `json:"safetyCode"`
 	} `json:"keys"`
+	SafetyCode struct {
+		Cases []struct {
+			HubKey    string `json:"hubKey"`
+			DeviceKey string `json:"deviceKey"`
+			CodeValue string `json:"codeValue"`
+			Code      string `json:"code"`
+		} `json:"cases"`
+	} `json:"safetyCode"`
 	Auth struct {
 		Expiry int64  `json:"expiry"`
 		Nonce  string `json:"nonce"`

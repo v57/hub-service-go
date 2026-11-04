@@ -117,7 +117,7 @@ else stays a plain key connection.
 
 - Device key: `$HUB_DEVICE_KEY`, else `/var/lib/hub/device.key` for uid 0,
   else `~/.hub/device.key` (created on first use, 0600, same layout as `auth`).
-  `LoadDeviceKey`, `SetDeviceKeyPath`, `DeviceKey.ID()` and `SafetyCode()`.
+  `LoadDeviceKey`, `SetDeviceKeyPath`, `DeviceKey.ID()` and `SafetyCode(hubKey, codeValue)`.
 - `DeviceOptions`: `Disabled`, `Key`, `Instance` (default the service `Name`,
   else the working directory's name, else `service`), `Name` (default the
   macOS computer name, else the host name without `.local`), `Platform`,

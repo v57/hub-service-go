@@ -27,8 +27,13 @@ func TestDeviceKeyMatchesVectors(t *testing.T) {
 	v := loadVectors(t)
 	key := vectorDeviceKey(t, v)
 	device := v.Keys["device"]
-	if key.PublicKey() != device.PublicKey || key.ID() != device.DeviceID || key.SafetyCode() != device.SafetyCode {
-		t.Fatalf("device key: %s %s %q", key.PublicKey(), key.ID(), key.SafetyCode())
+	if key.PublicKey() != device.PublicKey || key.ID() != device.DeviceID {
+		t.Fatalf("device key: %s %s", key.PublicKey(), key.ID())
+	}
+	for _, code := range v.SafetyCode.Cases {
+		if got := SafetyCode(code.HubKey, code.DeviceKey, code.CodeValue); got != code.Code {
+			t.Fatalf("safety code: %q, want %q", got, code.Code)
+		}
 	}
 }
 
