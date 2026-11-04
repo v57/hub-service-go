@@ -162,7 +162,7 @@ func TestCertifierRenewsWithLessThanADayLeft(t *testing.T) {
 
 func TestServiceSendsDeviceHeader(t *testing.T) {
 	v := loadVectors(t)
-	hub := newInfoHub(t, "")
+	hub := newFakeHub(t, provingHub(t, "hub"))
 	private, _ := KeyFromFile(v.Keys["service"].KeyFile)
 	device := vectorDeviceKey(t, v)
 	s := New(ServiceOptions{Address: hub.port, Key: private, Name: "Backup",
@@ -182,20 +182,20 @@ func TestServiceSendsDeviceHeader(t *testing.T) {
 		t.Fatalf("certificate times: %+v", certificate)
 	}
 
-	plain := New(ServiceOptions{Key: private, Device: DeviceOptions{Disabled: true}})
+	plain := New(ServiceOptions{Address: hub.port, Key: private, Device: DeviceOptions{Disabled: true}})
 	if _, ok := plain.authHeaders()["device"]; ok {
 		t.Fatal("device header with device mode disabled")
 	}
-	custom := New(ServiceOptions{Sign: noSign})
+	custom := New(ServiceOptions{Address: hub.port, Sign: noSign})
 	if _, ok := custom.authHeaders()["device"]; ok {
 		t.Fatal("device header with a custom signer")
 	}
-	named := New(ServiceOptions{Key: private, Name: "Echo"})
+	named := New(ServiceOptions{Address: hub.port, Key: private, Name: "Echo"})
 	certificate, err = VerifyCertificate(named.authHeaders()["device"])
 	if err != nil || certificate.Instance != "Echo" || certificate.DeviceName == "" {
 		t.Fatalf("default instance: %+v %v", certificate, err)
 	}
-	unnamed := New(ServiceOptions{Key: private})
+	unnamed := New(ServiceOptions{Address: hub.port, Key: private})
 	certificate, err = VerifyCertificate(unnamed.authHeaders()["device"])
 	if dir, _ := os.Getwd(); err != nil || certificate.Instance != filepath.Base(dir) {
 		t.Fatalf("instance without a name: %+v %v", certificate, err)

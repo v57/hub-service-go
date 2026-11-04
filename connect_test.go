@@ -2,8 +2,11 @@ package hubservice
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,9 +14,32 @@ import (
 	"github.com/v57/channel-go/server"
 )
 
+// answerHubInfo makes ch answer hub/info with a proof of the vectors' hub key
+// and a fresh challenge per question.
+func answerHubInfo(t *testing.T, ch *channelgo.Channel) {
+	t.Helper()
+	hub := loadVectors(t).Keys["hub"]
+	private, err := KeyFromFile(hub.KeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var challenges atomic.Int64
+	ch.Post("hub/info", func(body channelgo.Body) (any, error) {
+		answer := map[string]any{"key": hub.PublicKey, "protocol": 2, "pro": true, "mode": "default-allow",
+			"challenge": "challenge-" + strconv.FormatInt(challenges.Add(1), 10)}
+		if input, _ := body.Body.(map[string]any); input != nil {
+			if nonce, _ := input["nonce"].(string); nonce != "" {
+				answer["proof"] = base64.StdEncoding.EncodeToString(ed25519.Sign(private, []byte(HubInfoSignedData(hub.PublicKey, nonce))))
+			}
+		}
+		return answer, nil
+	})
+}
+
 // testHub is a channel-go server standing in for hub-server.
 func testHub(t *testing.T, ch *channelgo.Channel) int {
 	t.Helper()
+	answerHubInfo(t, ch)
 	srv, err := server.Listen(ch, 0, server.Options{})
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -24,7 +50,7 @@ func testHub(t *testing.T, ch *channelgo.Channel) int {
 	return number
 }
 
-func noSign() (string, error) { return "", nil }
+func noSign(string, string) (string, error) { return "", nil }
 
 func TestOnConnectRunsAfterServiceUpdate(t *testing.T) {
 	hub := channelgo.NewChannel()

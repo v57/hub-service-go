@@ -1,9 +1,12 @@
 package hubservice
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,14 +25,21 @@ type vectors struct {
 		SafetyCode string `json:"safetyCode"`
 	} `json:"keys"`
 	Auth struct {
-		Expiry int64 `json:"expiry"`
-		V0     struct {
-			Header string `json:"header"`
-		} `json:"v0"`
-		V1 struct {
+		Expiry int64  `json:"expiry"`
+		Nonce  string `json:"nonce"`
+		V1     struct {
 			Header string `json:"header"`
 		} `json:"v1"`
 	} `json:"auth"`
+	HubInfo struct {
+		Nonce      string `json:"nonce"`
+		SignedData string `json:"signedData"`
+		Proof      string `json:"proof"`
+	} `json:"hubInfo"`
+	Transport []struct {
+		URL       string `json:"url"`
+		Transport string `json:"transport"`
+	} `json:"transport"`
 	Certificate      certificateVector `json:"certificate"`
 	ChildCertificate certificateVector `json:"childCertificate"`
 	Caller           struct {
@@ -62,11 +72,7 @@ func TestAuthTokensMatchVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	expiry := time.Unix(v.Auth.Expiry, 0)
-	v0, err := SignToken(private, "", expiry)
-	if err != nil || v0 != v.Auth.V0.Header {
-		t.Fatalf("v0 token:\n got %s\nwant %s (%v)", v0, v.Auth.V0.Header, err)
-	}
-	v1, err := SignToken(private, v.Keys["hub"].PublicKey, expiry)
+	v1, err := SignToken(private, v.Keys["hub"].PublicKey, v.Auth.Nonce, expiry)
 	if err != nil || v1 != v.Auth.V1.Header {
 		t.Fatalf("v1 token:\n got %s\nwant %s (%v)", v1, v.Auth.V1.Header, err)
 	}
@@ -123,24 +129,69 @@ func TestDefaultHubKeysBesideKeyFile(t *testing.T) {
 	}
 }
 
-// infoHub is a test hub that answers hub/info (unless key is empty) and
-// records the headers of every connection.
-type infoHub struct {
+func TestHubInfoProofMatchesVectors(t *testing.T) {
+	v := loadVectors(t)
+	hub := v.Keys["hub"].PublicKey
+	if got := HubInfoSignedData(hub, v.HubInfo.Nonce); got != v.HubInfo.SignedData {
+		t.Fatalf("signed data: %s", got)
+	}
+	info := HubInfo{Key: hub, Proof: v.HubInfo.Proof, Challenge: "c"}
+	if !info.Proves(v.HubInfo.Nonce) {
+		t.Fatal("proof doesn't verify")
+	}
+	if info.Proves("another-nonce-another-nonce") {
+		t.Fatal("proof verifies for another nonce")
+	}
+	info.Key = v.Keys["service"].PublicKey
+	if info.Proves(v.HubInfo.Nonce) {
+		t.Fatal("proof verifies for another key")
+	}
+}
+
+func TestTransportMatchesVectors(t *testing.T) {
+	for _, c := range loadVectors(t).Transport {
+		if got := HubTransportOf(c.URL); string(got) != c.Transport {
+			t.Errorf("%s: %s, want %s", c.URL, got, c.Transport)
+		}
+	}
+}
+
+func TestPublicPlaintextIsNotDialed(t *testing.T) {
+	s := New(ServiceOptions{Address: "ws://hub.example.com:1997", Sign: noSign})
+	s.Start()
+	defer s.Stop()
+	if s.Sender() != nil {
+		t.Fatal("dialed a public ws:// address")
+	}
+	if _, err := s.Send("x", nil); err == nil || !strings.Contains(err.Error(), "unencrypted") {
+		t.Fatalf("send: %v", err)
+	}
+	allowed := New(ServiceOptions{Address: "ws://127.0.0.1:1", Sign: noSign, AllowPlaintext: true})
+	if allowed.allowPlaintext != true {
+		t.Fatal("AllowPlaintext ignored")
+	}
+}
+
+// fakeHub answers hub/info as answer says and records every connection's
+// headers. Its tokens are checked by the tests.
+type fakeHub struct {
 	mu      sync.Mutex
 	headers []map[string]string
 	port    int
 	updates chan map[string]string
 }
 
-func newInfoHub(t *testing.T, key string) *infoHub {
+func newFakeHub(t *testing.T, answer func(nonce, challenge string) map[string]any) *fakeHub {
 	t.Helper()
-	h := &infoHub{updates: make(chan map[string]string, 16)}
+	h := &fakeHub{updates: make(chan map[string]string, 16)}
 	ch := channelgo.NewChannel()
-	if key != "" {
-		ch.Post("hub/info", func(channelgo.Body) (any, error) {
-			return map[string]any{"key": key, "protocol": 1, "pro": true, "mode": "default-allow"}, nil
-		})
-	}
+	asked := 0
+	ch.Post("hub/info", func(body channelgo.Body) (any, error) {
+		input, _ := body.Body.(map[string]any)
+		nonce, _ := input["nonce"].(string)
+		asked++
+		return answer(nonce, "challenge-"+strconv.Itoa(asked)), nil
+	})
 	ch.Post("hub/service/update", func(body channelgo.Body) (any, error) {
 		headers, _ := body.State.(map[string]string)
 		h.updates <- headers
@@ -157,19 +208,11 @@ func newInfoHub(t *testing.T, key string) *infoHub {
 	}
 	t.Cleanup(func() { _ = srv.Stop() })
 	_, port, _ := strings.Cut(srv.Addr(), ":")
-	h.port = atoi(port)
+	h.port, _ = strconv.Atoi(port)
 	return h
 }
 
-func atoi(value string) int {
-	n := 0
-	for _, c := range value {
-		n = n*10 + int(c-'0')
-	}
-	return n
-}
-
-func (h *infoHub) next(t *testing.T) map[string]string {
+func (h *fakeHub) next(t *testing.T) map[string]string {
 	t.Helper()
 	select {
 	case headers := <-h.updates:
@@ -180,13 +223,39 @@ func (h *infoHub) next(t *testing.T) map[string]string {
 	}
 }
 
-func TestServiceAsksHubKeyBeforeConnecting(t *testing.T) {
+// credentialsSent lists the auth headers the hub has seen so far.
+func (h *fakeHub) credentialsSent() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var sent []string
+	for _, headers := range h.headers {
+		if headers["auth"] != "" || headers["device"] != "" {
+			sent = append(sent, headers["auth"])
+		}
+	}
+	return sent
+}
+
+func provingHub(t *testing.T, name string) func(nonce, challenge string) map[string]any {
+	t.Helper()
+	key := loadVectors(t).Keys[name]
+	private, err := KeyFromFile(key.KeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return func(nonce, challenge string) map[string]any {
+		return map[string]any{"key": key.PublicKey, "protocol": 2, "challenge": challenge,
+			"proof": base64.StdEncoding.EncodeToString(ed25519.Sign(private, []byte(HubInfoSignedData(key.PublicKey, nonce))))}
+	}
+}
+
+func TestServiceSendsATokenOnlyAfterProof(t *testing.T) {
 	v := loadVectors(t)
-	hub := newInfoHub(t, v.Keys["hub"].PublicKey)
+	hub := newFakeHub(t, provingHub(t, "hub"))
 	private, _ := KeyFromFile(v.Keys["service"].KeyFile)
 	pins := filepath.Join(t.TempDir(), "hubs.json")
-	s := New(ServiceOptions{Address: hub.port, Key: private, HubKeys: pins})
-	// A call made right away waits for the hub-bound connection.
+	s := New(ServiceOptions{Address: hub.port, Key: private, HubKeys: pins, Device: DeviceOptions{Disabled: true}})
+	// A call made right away waits for the authenticated connection.
 	reply := make(chan error, 1)
 	s.Start()
 	defer s.Stop()
@@ -195,70 +264,96 @@ func TestServiceAsksHubKeyBeforeConnecting(t *testing.T) {
 		reply <- err
 	}()
 
-	// hub/info goes on a short anonymous connection; the service connects
-	// once, hub-bound.
 	registered := hub.next(t)
 	if registered["v"] != "1" {
-		t.Fatalf("registered connect headers: %v", registered)
+		t.Fatalf("headers: %v", registered)
 	}
 	verifyToken(t, registered["auth"], "hub1:"+v.Keys["hub"].PublicKey+":")
 	if err := <-reply; err != nil {
 		t.Fatalf("call made before the connect: %v", err)
 	}
-	hub.mu.Lock()
-	connects := append([]map[string]string(nil), hub.headers...)
-	hub.mu.Unlock()
-	if len(connects) != 2 || connects[0]["auth"] != "" || connects[1]["v"] != "1" {
-		t.Fatalf("connects: %v", connects)
-	}
 	if s.HubKey() != v.Keys["hub"].PublicKey || OpenHubKeys(pins).Get(hub.port) != v.Keys["hub"].PublicKey {
 		t.Fatalf("hub key not pinned: %q", s.HubKey())
 	}
-
-	// A new service with the same pins starts on v1 straight away.
-	again := New(ServiceOptions{Address: hub.port, Key: private, HubKeys: pins})
+	hub.mu.Lock()
+	first := hub.headers[0]
+	hub.mu.Unlock()
+	if first["auth"] != "" || first["device"] != "" {
+		t.Fatalf("the first connection carried credentials: %v", first)
+	}
+	// A service with the pin also asks first, for its own challenge.
+	again := New(ServiceOptions{Address: hub.port, Key: private, HubKeys: pins, Device: DeviceOptions{Disabled: true}})
 	again.Start()
 	defer again.Stop()
-	if headers := hub.next(t); headers["v"] != "1" {
-		t.Fatalf("pinned connect headers: %v", headers)
-	}
-	select {
-	case headers := <-hub.updates:
-		t.Fatalf("unexpected reconnect: %v", headers)
-	case <-time.After(300 * time.Millisecond):
+	if headers := hub.next(t); headers["v"] != "1" || strings.Split(headers["auth"], ".")[4] == strings.Split(registered["auth"], ".")[4] {
+		t.Fatalf("second token reused a challenge: %v", headers)
 	}
 }
 
-func TestServiceStaysOnV0WithoutHubInfo(t *testing.T) {
+func TestHubWithoutProofGetsNothing(t *testing.T) {
 	v := loadVectors(t)
-	hub := newInfoHub(t, "")
+	for name, answer := range map[string]func(nonce, challenge string) map[string]any{
+		"no proof": func(_, challenge string) map[string]any {
+			return map[string]any{"key": v.Keys["hub"].PublicKey, "challenge": challenge}
+		},
+		"another key's proof": func(nonce, challenge string) map[string]any {
+			// Claims the real hub's key, signs with its own.
+			answer := provingHub(t, "service")(nonce, challenge)
+			answer["key"] = v.Keys["hub"].PublicKey
+			return answer
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			hub := newFakeHub(t, answer)
+			private, _ := KeyFromFile(v.Keys["service"].KeyFile)
+			s := New(ServiceOptions{Address: hub.port, Key: private, Device: DeviceOptions{Disabled: true}})
+			s.Start()
+			defer s.Stop()
+			select {
+			case headers := <-hub.updates:
+				t.Fatalf("connected: %v", headers)
+			case <-time.After(1500 * time.Millisecond):
+			}
+			if sent := hub.credentialsSent(); len(sent) != 0 {
+				t.Fatalf("sent credentials: %v", sent)
+			}
+			if s.HubKey() != "" {
+				t.Fatalf("pinned %q", s.HubKey())
+			}
+		})
+	}
+}
+
+func TestHubWithAnotherKeyThanThePinGetsNothing(t *testing.T) {
+	v := loadVectors(t)
+	// Proves its own key, but this address is pinned to the real hub's.
+	hub := newFakeHub(t, provingHub(t, "service"))
 	private, _ := KeyFromFile(v.Keys["service"].KeyFile)
-	s := New(ServiceOptions{Address: hub.port, Key: private})
+	s := New(ServiceOptions{Address: hub.port, Key: private, HubKey: v.Keys["hub"].PublicKey, Device: DeviceOptions{Disabled: true}})
 	s.Start()
 	defer s.Stop()
-	if headers := hub.next(t); headers["v"] != "0" {
-		t.Fatalf("headers: %v", headers)
-	}
 	select {
 	case headers := <-hub.updates:
-		t.Fatalf("unexpected reconnect: %v", headers)
-	case <-time.After(300 * time.Millisecond):
+		t.Fatalf("connected: %v", headers)
+	case <-time.After(1500 * time.Millisecond):
 	}
-	if s.HubKey() != "" {
-		t.Fatalf("pinned %q", s.HubKey())
+	if sent := hub.credentialsSent(); len(sent) != 0 {
+		t.Fatalf("sent credentials: %v", sent)
 	}
+	if s.HubKey() != v.Keys["hub"].PublicKey {
+		t.Fatalf("pin replaced: %q", s.HubKey())
+	}
+	s.Stop() // ends the waiting handshake rather than hanging
 }
 
 func TestHubKeyOptionPinsUpFront(t *testing.T) {
 	v := loadVectors(t)
 	private, _ := KeyFromFile(v.Keys["service"].KeyFile)
 	s := New(ServiceOptions{Address: 7001, Key: private, HubKey: v.Keys["hub"].PublicKey})
-	headers := s.authHeaders()
-	if headers["v"] != "1" {
-		t.Fatalf("headers: %v", headers)
+	if s.HubKey() != v.Keys["hub"].PublicKey {
+		t.Fatalf("hub key: %q", s.HubKey())
 	}
-	verifyToken(t, headers["auth"], "hub1:"+v.Keys["hub"].PublicKey+":")
-	if err := s.ForgetHubKey(); err != nil || s.authHeaders()["v"] != "0" {
-		t.Fatalf("forget: %v", err)
+	if err := s.ForgetHubKey(); err != nil || s.HubKey() != "" {
+		t.Fatalf("forget: %v, %q", err, s.HubKey())
 	}
 }

@@ -5,12 +5,11 @@ package hubservice
 //   - The key file (`auth` in the working directory, or $HUBKEY) holds the
 //     base64 of the 48-byte PKCS8 DER private key followed by the 44-byte SPKI
 //     DER public key.
-//   - A token is `key.<pub>.<sig>.<expiry>`: pub is the base64 SPKI public key,
-//     expiry the decimal Unix time in seconds, sig the base64 Ed25519 signature
-//     of the expiry string (v0) or of `hub1:<hub SPKI>:<expiry>` (v1, bound to
-//     one hub; Docs/Devices/protocol.md section 2).
-//
-// hub-lite ignores the auth header.
+//   - A token is `key.<pub>.<sig>.<expiry>.<nonce>`: pub is the base64 SPKI
+//     public key, expiry the decimal Unix time in seconds, nonce the challenge
+//     the hub answered in hub/info, sig the base64 Ed25519 signature of
+//     `hub1:<hub SPKI>:<nonce>:<expiry>` (one connection to one hub;
+//     Docs/Devices/protocol.md section 2).
 
 import (
 	"crypto/ed25519"
@@ -29,12 +28,11 @@ import (
 const (
 	privateDerLength = 48
 	publicDerLength  = 44
-	// authVersion is sent as the `v` header next to `auth` for unbound
-	// tokens; authVersionHub for hub-bound ones.
-	authVersion    = "0"
-	authVersionHub = "1"
-	// signExpiry is the protocol's SDK default; hubs accept at most 300 s.
-	signExpiry = 60 * time.Second
+	// authVersion is sent as the `v` header next to `auth`.
+	authVersion = "1"
+	// signExpiry is the protocol's SDK default; a token is for one connect, and
+	// hubs accept at most 60 s.
+	signExpiry = 30 * time.Second
 )
 
 type keychainKey struct {
@@ -67,36 +65,26 @@ func PublicKey() (string, error) {
 	return base64.StdEncoding.EncodeToString(key.publicDer), nil
 }
 
-// Sign returns a fresh v0 auth token that expires in 60 seconds.
-func Sign() (string, error) {
-	return SignHub("")
-}
-
-// SignHub returns a fresh auth token bound to hubKey (v1), or an unbound v0
-// token when hubKey is empty. It expires in 60 seconds.
-func SignHub(hubKey string) (string, error) {
+// SignHub returns a fresh auth token for one connection to the hub with key
+// hubKey, over the challenge it answered in `hub/info`.
+func SignHub(hubKey, nonce string) (string, error) {
 	key, err := loadKey()
 	if err != nil {
 		return "", err
 	}
-	return SignToken(key.private, hubKey, time.Now().Add(signExpiry))
+	return SignToken(key.private, hubKey, nonce, time.Now().Add(signExpiry))
 }
 
-// SignToken signs an auth token with a service key: v1 (`hub1:<hubKey>:<expiry>`)
-// when hubKey is set, else v0 (`<expiry>`).
-func SignToken(private ed25519.PrivateKey, hubKey string, expiry time.Time) (string, error) {
+// SignToken signs an auth token with a service key: `hub1:<hubKey>:<nonce>:<expiry>`.
+func SignToken(private ed25519.PrivateKey, hubKey, nonce string, expiry time.Time) (string, error) {
 	publicDer, err := x509.MarshalPKIXPublicKey(private.Public())
 	if err != nil {
 		return "", err
 	}
 	data := strconv.FormatInt(expiry.Unix(), 10)
-	signed := data
-	if hubKey != "" {
-		signed = "hub1:" + hubKey + ":" + data
-	}
-	signature := ed25519.Sign(private, []byte(signed))
+	signature := ed25519.Sign(private, []byte("hub1:"+hubKey+":"+nonce+":"+data))
 	return "key." + base64.StdEncoding.EncodeToString(publicDer) + "." +
-		base64.StdEncoding.EncodeToString(signature) + "." + data, nil
+		base64.StdEncoding.EncodeToString(signature) + "." + data + "." + nonce, nil
 }
 
 // KeyFromFile parses key file text (keychain layout) into a private key.

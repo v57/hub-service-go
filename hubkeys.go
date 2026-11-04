@@ -1,10 +1,10 @@
 package hubservice
 
-// Hub key pinning (Docs/Devices/protocol.md section 2). A v1 auth token signs
-// `hub1:<hub SPKI>:<expiry>`, so it only works on the hub it was made for. The
-// SDK learns the hub key from `hub/info` on its first (v0) connection, pins it
-// per hub address in `hubs.json` beside the key file, and connects with v1
-// from then on. hub-lite doesn't answer `hub/info`, so it stays on v0.
+// Hub key pinning (Docs/Devices/protocol.md section 2). An auth token signs
+// `hub1:<hub SPKI>:<nonce>:<expiry>`, so it only works once, on the hub it was
+// made for. The SDK pins the key a hub proved in `hub/info`, per hub address in
+// `hubs.json` beside the key file; a hub that later claims another key gets
+// nothing.
 
 import (
 	"crypto/ed25519"
@@ -70,7 +70,7 @@ func (h *HubKeys) Pin(address any, hubKey string) error {
 	return h.update(func(pins map[string]string) { pins[HubAddress(address)] = hubKey })
 }
 
-// Forget clears the pin for a hub address; the next connect learns it again.
+// Forget clears the pin for a hub address; the next connect pins what it proves.
 func (h *HubKeys) Forget(address any) error {
 	return h.update(func(pins map[string]string) { delete(pins, HubAddress(address)) })
 }

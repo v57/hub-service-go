@@ -7,8 +7,8 @@ Go port of [hub-service](https://github.com/v57/hub-service) — connect to a
 [hub](https://github.com/v57/hub-lite) (default `ws://127.0.0.1:1997`), host
 your own post/stream API endpoints, register apps, and call API through the hub.
 
-Works with hub-lite and hub-server: every (re)connect sends a fresh hub-server auth
-token signed with the service's Ed25519 key (hub-lite ignores it). The wire
+Works with hub-server: every (re)connect asks the hub to prove its key, then sends a
+fresh auth token signed with the service's Ed25519 key. The wire
 contract matches the TS reference (`hub/profile/update`, `hub/service/update`,
 AppInterface + element DSL).
 
@@ -66,7 +66,8 @@ response, _ := service.Send("echo/upper", "hello") // "HELLO"
 - `New(options ...ServiceOptions)` — `Address` (port or ws:// URL; default
   `1997` or `$HUB`), `Name`, `Icon`, `Key` (service key; default the
   keychain), `HubKeys` (pin file), `HubKey` (hub key known up front), `Sign`
-  (custom v0 token factory; turns off hub key pinning and device mode),
+  (custom token factory given the proven hub key and the challenge; turns off device mode),
+  `AllowPlaintext` (dial plain `ws://` beyond loopback, the overlay and the LAN; also `HUB_ALLOW_PLAINTEXT=1`),
   `Device` (device mode options)
 - `Post(path, handler func(body any) (any, error), settings ...ApiSettings) *Service`
 - `Stream(path, handler func(body any, emit func(any) error) error, settings ...ApiSettings) *Service`
@@ -82,8 +83,8 @@ response, _ := service.Send("echo/upper", "hello") // "HELLO"
 - `Start() *Service` — connect with `auth` + `v` headers; re-sends
   `hub/profile/update` (if set) and `hub/service/update` on every reconnect
 - `HubKey()` / `ForgetHubKey()` — the pinned hub key for this address
-- `Sign() (string, error)` — fresh v0 `key.<pub>.<sig>.<expiry>` token (60 s);
-  `SignHub(hubKey)` and `SignToken(key, hubKey, expiry)` sign v1 tokens
+- `SignHub(hubKey, nonce)` and `SignToken(key, hubKey, nonce, expiry)` — a token
+  `key.<pub>.<sig>.<expiry>.<nonce>` for one connection (30 s)
 - `PublicKey() (string, error)` — the service's SPKI public key (base64), its
   hub-server identity
 - `SetKeyPath(path)` — key file location (default `$HUBKEY`, else `auth` in
@@ -94,16 +95,17 @@ segment, TS parity) and `Limit` — wire-parity fields that hub-lite ignores.
 
 ## Hub-bound tokens
 
-A v1 token signs `hub1:<hub key>:<expiry>`, so it only works on the hub it was
-made for (`Docs/Devices/protocol.md`). Before connecting to a hub whose key
-isn't pinned, the service asks `hub/info` for it over a short anonymous
-connection and pins it in `hubs.json` beside the key file
-(`{ "ws://localhost:1997": "<hub SPKI>" }`; a bare port pins as
+A token signs `hub1:<hub key>:<nonce>:<expiry>`, so it works once, on the hub it
+was made for (`Docs/Devices/protocol.md` section 2). Before every connect the
+service asks `hub/info` with a fresh nonce on a short anonymous connection. Only
+an answer with a valid proof of the key it claims gets a token, over that
+answer's challenge. The first proven key is pinned in `hubs.json` beside the key
+file (`{ "ws://localhost:1997": "<hub SPKI>" }`; a bare port pins as
 `ws://localhost:<port>`, URLs with lowercased scheme and host and no trailing
-slash). The service itself then connects with v1 from the start, so calls made
-right after `Start` are never lost to a reconnect. hub-lite doesn't answer
-`hub/info`, so services stay on v0 there. A pinned hub that refuses the token
-is reported, never silently downgraded; `ForgetHubKey` clears the pin.
+slash). A hub that doesn't prove its key, or answers with another than the pinned
+one, gets nothing and is reported while the service keeps trying, so calls made
+right after `Start` wait instead of being lost. Plain `ws://` beyond loopback,
+the overlay and the LAN isn't dialed unless `AllowPlaintext` says so. `ForgetHubKey` clears the pin.
 
 ## Devices
 

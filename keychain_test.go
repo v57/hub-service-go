@@ -54,23 +54,23 @@ func TestKeychainGeneratesKeyFileInTSLayout(t *testing.T) {
 
 func TestSignTokenVerifies(t *testing.T) {
 	useKeyPath(t, filepath.Join(t.TempDir(), "auth"))
-	token, err := Sign()
+	token, err := SignHub("hub-key", "nonce")
 	if err != nil {
 		t.Fatal(err)
 	}
 	parts := strings.Split(token, ".")
-	if len(parts) != 4 || parts[0] != "key" {
+	if len(parts) != 5 || parts[0] != "key" {
 		t.Fatalf("token shape: %q", token)
 	}
-	verifyToken(t, token, "")
+	verifyToken(t, token, "hub1:hub-key:")
 }
 
-// verifyToken checks a token's signature over prefix+expiry and that it
-// expires about 60 seconds from now.
+// verifyToken checks a token's signature over prefix+nonce:expiry and that it
+// expires about 30 seconds from now.
 func verifyToken(t *testing.T, token, prefix string) {
 	t.Helper()
 	parts := strings.Split(token, ".")
-	if len(parts) != 4 || parts[0] != "key" {
+	if len(parts) != 5 || parts[0] != "key" {
 		t.Fatalf("token shape: %q", token)
 	}
 	publicDer, _ := base64.StdEncoding.DecodeString(parts[1])
@@ -79,15 +79,15 @@ func verifyToken(t *testing.T, token, prefix string) {
 		t.Fatal(err)
 	}
 	signature, _ := base64.StdEncoding.DecodeString(parts[2])
-	if !ed25519.Verify(parsed.(ed25519.PublicKey), []byte(prefix+parts[3]), signature) {
+	if !ed25519.Verify(parsed.(ed25519.PublicKey), []byte(prefix+parts[4]+":"+parts[3]), signature) {
 		t.Fatal("signature does not verify")
 	}
 	expiry, err := strconv.ParseInt(parts[3], 10, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if left := time.Until(time.Unix(expiry, 0)); left < 55*time.Second || left > 61*time.Second {
-		t.Fatalf("expiry %v from now, want about 60s", left)
+	if left := time.Until(time.Unix(expiry, 0)); left < 25*time.Second || left > 31*time.Second {
+		t.Fatalf("expiry %v from now, want about 30s", left)
 	}
 }
 
@@ -109,15 +109,7 @@ func TestKeychainRejectsInvalidFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	useKeyPath(t, path)
-	if _, err := Sign(); err == nil {
+	if _, err := SignHub("hub-key", "nonce"); err == nil {
 		t.Fatal("expected an error for a malformed key file")
-	}
-}
-
-func TestAuthHeadersUseSignOption(t *testing.T) {
-	service := New(ServiceOptions{Sign: func() (string, error) { return "key.a.b.1", nil }})
-	headers := service.authHeaders()
-	if headers["auth"] != "key.a.b.1" || headers["v"] != "0" {
-		t.Fatalf("headers: %v", headers)
 	}
 }

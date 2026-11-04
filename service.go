@@ -1,15 +1,13 @@
-// Package hubservice lets a Go process connect to a hub (hub-lite/hub-server),
+// Package hubservice lets a Go process connect to a hub (hub-server),
 // host post/stream API endpoints, and call API through the hub.
 //
-// Port of hub-service (TS reference). Every (re)connect sends a fresh hub-server
-// auth token from the keychain (see keychain.go), bound to the hub's key once
-// it is known (see hubkeys.go); hub-lite ignores it.
+// Port of hub-service (TS reference). Every (re)connect asks the hub to prove
+// its key and sends a fresh token for that answer alone (see hubproof.go).
 package hubservice
 
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -44,10 +42,13 @@ type ServiceOptions struct {
 	// HubKey is the hub's key when it is known up front (an invitation or
 	// config). It is pinned for Address.
 	HubKey string
-	// Sign replaces the SDK's signing: its token goes out with `v: 0` on every
-	// connect and the hub key is never learned. Default: nil (the SDK signs
-	// with Key).
-	Sign func() (string, error)
+	// Sign replaces the SDK's signing: it gets the key the hub proved and the
+	// challenge of this connect. Default: nil (the SDK signs with Key).
+	Sign func(hubKey, nonce string) (string, error)
+	// AllowPlaintext dials plain ws:// beyond loopback, the overlay and the LAN,
+	// which would carry the key unencrypted: for private networks the SDK can't
+	// recognize, such as a container's ws://hub:1997. Also HUB_ALLOW_PLAINTEXT=1.
+	AllowPlaintext bool
 	// Device certifies the service key with this device's key on every
 	// connect (the `device` header). On by default; ignored with Sign.
 	Device DeviceOptions
@@ -107,15 +108,17 @@ type Service struct {
 	paths    map[string]struct{}
 	settings map[string]ApiSettings
 	sender   *channelgo.Sender
-	// noHubInfo is set when the hub answered hub/info with an error
-	// (hub-lite), so reconnects don't ask again.
-	noHubInfo bool
-	sign      func() (string, error)
-	key       ed25519.PrivateKey
-	hubKeys   *HubKeys
-	device    *deviceCertifier
-	onConnect func(*channelgo.Sender)
-	mu        sync.Mutex
+	// stopped ends a handshake that is waiting to try again.
+	stopped chan struct{}
+	// refusal says why Start dialed nothing.
+	refusal        error
+	allowPlaintext bool
+	sign           func(hubKey, nonce string) (string, error)
+	key            ed25519.PrivateKey
+	hubKeys        *HubKeys
+	device         *deviceCertifier
+	onConnect      func(*channelgo.Sender)
+	mu             sync.Mutex
 }
 
 // New creates a Service. Options are optional; the first one wins.
@@ -132,6 +135,8 @@ func New(options ...ServiceOptions) *Service {
 		sign:      opts.Sign,
 		key:       opts.Key,
 		onConnect: opts.OnConnect,
+
+		allowPlaintext: opts.AllowPlaintext || os.Getenv("HUB_ALLOW_PLAINTEXT") == "1",
 	}
 	if opts.Address != nil {
 		s.address = opts.Address
@@ -245,6 +250,13 @@ func (s *Service) startLocked() {
 	if s.sender != nil {
 		return
 	}
+	s.refusal = nil
+	if !s.allowPlaintext && HubTransportOf(s.address) == TransportRefused {
+		s.refusal = fmt.Errorf("%s would carry this service's key unencrypted. Use wss://, or set AllowPlaintext (HUB_ALLOW_PLAINTEXT=1) on a private network", HubAddress(s.address))
+		fmt.Fprintln(os.Stderr, "hub-service:", s.refusal)
+		return
+	}
+	s.stopped = make(chan struct{})
 	conn := client.Connect(s.ch, s.address, client.Options{
 		Headers: s.authHeaders,
 		OnConnect: func(sender *channelgo.Sender) {
@@ -257,47 +269,16 @@ func (s *Service) startLocked() {
 	s.sender = conn.Sender
 }
 
-// HubKey is the hub's pinned key for this service's address, or "" while it
-// is unknown (the service then connects with v0 tokens).
+// HubKey is the hub's pinned key for this service's address, or "" until a
+// hub proved one.
 func (s *Service) HubKey() string {
 	return s.hubKeys.Get(s.address)
 }
 
 // ForgetHubKey clears the pinned hub key, for a hub whose key changed. The
-// next connect learns it again.
+// next connect pins what the hub proves.
 func (s *Service) ForgetHubKey() error {
 	return s.hubKeys.Forget(s.address)
-}
-
-// connectHubKey is the hub key for the next connect. With none pinned it
-// asks the hub first (hub/info on a short anonymous connection) and pins the
-// answer, so the service connects hub-bound (v1) from its first connect and
-// requests queued meanwhile go out on that connection. hub-lite and older
-// hubs don't answer hub/info and stay on v0.
-func (s *Service) connectHubKey() string {
-	if key := s.HubKey(); key != "" {
-		return key
-	}
-	s.mu.Lock()
-	skip := s.noHubInfo
-	s.mu.Unlock()
-	if skip {
-		return ""
-	}
-	key, answered := probeHubKey(s.address, hubInfoTimeout)
-	if key == "" {
-		if answered {
-			s.mu.Lock()
-			s.noHubInfo = true
-			s.mu.Unlock()
-		}
-		return ""
-	}
-	if err := s.hubKeys.Pin(s.address, key); err != nil {
-		fmt.Fprintln(os.Stderr, "hub-service: pin hub key:", err)
-		return ""
-	}
-	return key
 }
 
 // dialHost is the host:port the client dials for address.
@@ -315,46 +296,14 @@ func dialHost(address any) string {
 	return net.JoinHostPort(parsed.Hostname(), "80")
 }
 
-// hubInfoTimeout bounds the hub/info probe before a connect.
+// hubInfoTimeout bounds the hub/info question before a connect.
 const hubInfoTimeout = 5 * time.Second
 
-// probeHubKey asks the hub at address for its key. answered is true when the
-// hub responded at all (an error response means it has no hub/info).
-func probeHubKey(address any, timeout time.Duration) (key string, answered bool) {
-	// The client retries a refused connect forever; a hub that is down
-	// fails here at once.
-	dial, err := net.DialTimeout("tcp", dialHost(address), timeout)
-	if err != nil {
-		return "", false
-	}
-	dial.Close()
-	conn := client.Connect(channelgo.NewChannel(), address, client.Options{})
-	defer conn.Stop()
-	type result struct {
-		key      string
-		answered bool
-	}
-	done := make(chan result, 1)
-	go func() {
-		value, err := conn.Send("hub/info", nil)
-		if err != nil {
-			done <- result{answered: !strings.Contains(err.Error(), "disconnected")}
-			return
-		}
-		var info struct {
-			Key string `json:"key"`
-		}
-		data, _ := json.Marshal(value)
-		_ = json.Unmarshal(data, &info)
-		done <- result{key: info.Key, answered: true}
-	}()
-	select {
-	case r := <-done:
-		return r.key, r.answered
-	case <-time.After(timeout):
-		return "", false
-	}
-}
+// Retry delays for a hub that doesn't prove its key, or can't be reached.
+const (
+	handshakeRetry    = time.Second
+	handshakeMaxRetry = 30 * time.Second
+)
 
 // Sender returns the hub connection's sender, nil before Start and after Stop.
 func (s *Service) Sender() *channelgo.Sender {
@@ -368,43 +317,73 @@ func (s *Service) Stop() {
 	s.mu.Lock()
 	sender := s.sender
 	s.sender = nil
-	s.noHubInfo = false
+	if s.stopped != nil {
+		close(s.stopped)
+		s.stopped = nil
+	}
 	s.mu.Unlock()
 	if sender != nil {
 		sender.Stop()
 	}
 }
 
-// authHeaders signs a fresh token for each connect: bound to the hub (v1)
-// once its key is pinned, else v0, plus the device certificate. If signing
-// fails the connection goes out without auth: hub-lite accepts it, hub-server
-// treats it as an anonymous connection. Without a certificate it is a plain
-// key connection.
+// authHeaders runs before every connection attempt (protocol.md section 2). It
+// comes back with a token over a fresh challenge from a hub that proved its key;
+// until one has, it holds the attempt back, so nothing goes out and requests
+// keep waiting.
 func (s *Service) authHeaders() map[string]string {
-	if s.sign != nil {
-		token, err := s.sign()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "hub-service: auth token:", err)
-			return nil
+	s.mu.Lock()
+	stopped := s.stopped
+	s.mu.Unlock()
+	delay := handshakeRetry
+	last := ""
+	for {
+		headers, err := s.handshake()
+		if err == nil {
+			return headers
 		}
-		return map[string]string{"auth": token, "v": authVersion}
+		if message := err.Error(); message != last {
+			last = message
+			fmt.Fprintln(os.Stderr, "hub-service:", message)
+		}
+		select {
+		case <-stopped:
+			return nil
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, handshakeMaxRetry)
+	}
+}
+
+// handshake asks the hub for its proof and signs for that answer alone.
+func (s *Service) handshake() (map[string]string, error) {
+	info, err := askHub(s.address, hubInfoTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w, sending it nothing", HubAddress(s.address), err)
+	}
+	if pinned := s.HubKey(); pinned == "" {
+		if err := s.hubKeys.Pin(s.address, info.Key); err != nil {
+			return nil, fmt.Errorf("pin hub key: %w", err)
+		}
+	} else if pinned != info.Key {
+		return nil, fmt.Errorf("%s answers with key %s, not the pinned %s, sending it nothing. ForgetHubKey if its key really changed", HubAddress(s.address), info.Key, pinned)
+	}
+	if s.sign != nil {
+		token, err := s.sign(info.Key, info.Challenge)
+		if err != nil {
+			return nil, fmt.Errorf("auth token: %w", err)
+		}
+		return map[string]string{"auth": token, "v": authVersion}, nil
 	}
 	private, err := s.privateKey()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "hub-service: auth token:", err)
-		return nil
+		return nil, fmt.Errorf("auth token: %w", err)
 	}
-	hubKey := s.connectHubKey()
-	token, err := SignToken(private, hubKey, time.Now().Add(signExpiry))
+	token, err := SignToken(private, info.Key, info.Challenge, time.Now().Add(signExpiry))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "hub-service: auth token:", err)
-		return nil
+		return nil, fmt.Errorf("auth token: %w", err)
 	}
-	version := authVersion
-	if hubKey != "" {
-		version = authVersionHub
-	}
-	headers := map[string]string{"auth": token, "v": version}
+	headers := map[string]string{"auth": token, "v": authVersion}
 	if s.device != nil {
 		serviceKey, _, _ := strings.Cut(strings.TrimPrefix(token, "key."), ".")
 		if certificate, err := s.device.certificate(serviceKey); err != nil {
@@ -413,7 +392,7 @@ func (s *Service) authHeaders() map[string]string {
 			headers["device"] = certificate
 		}
 	}
-	return headers
+	return headers, nil
 }
 
 func (s *Service) privateKey() (ed25519.PrivateKey, error) {
@@ -444,6 +423,9 @@ func (s *Service) senderOrError() (*channelgo.Sender, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sender == nil {
+		if s.refusal != nil {
+			return nil, s.refusal
+		}
 		return nil, errNotStarted
 	}
 	return s.sender, nil
