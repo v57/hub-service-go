@@ -2,7 +2,7 @@ module github.com/v57/hub-service-go
 
 go 1.25.0
 
-require github.com/v57/channel-go v0.0.0
+require github.com/v57/channel-go v0.1.1-0.20261111091740-ee396d9f24ac
 
 require (
 	github.com/bytedance/gopkg v0.1.3 // indirect
@@ -15,4 +15,5 @@ require (
 	golang.org/x/sys v0.22.0 // indirect
 )
 
-replace github.com/v57/channel-go => ../../Channel/channel-go
+// v0.1.0's tag was moved after the Go checksum database recorded it, so it no longer verifies.
+retract v0.1.0

@@ -22,3 +22,7 @@ AGENTS.md
 .commandcode/
 .hermes/
 KANBAN*.md
+
+# Local workspace with ../../Channel/channel-go (scripts/test creates it)
+go.work
+go.work.sum

@@ -15,8 +15,13 @@ AppInterface + element DSL).
 ## Install
 
 ```bash
-go get github.com/v57/hub-service-go
+go get github.com/v57/hub-service-go@main
 ```
+
+Take `main` for now: the only tag, v0.1.0, is retracted (it predates the service's keys, and its tag was
+moved after the Go checksum database recorded it). The module gets
+[channel-go](https://github.com/v57/channel-go) from GitHub like any other dependency; `scripts/test` builds
+against a `../../Channel/channel-go` checkout through an untracked `go.work` when there is one.
 
 ## Usage
 

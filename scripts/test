@@ -6,5 +6,12 @@ hub_run="$(dirname "$0")/../../../HubTools/hub-run"
 
 cd "$(dirname "$0")/.."
 
+# Next to a Channel checkout, build against it: an untracked go.work stands in for a replace directive,
+# which would break the module for everyone who gets it from GitHub.
+if [[ ! -f go.work && -d ../../Channel/channel-go ]]; then
+  go work init . ../../Channel/channel-go
+  go work edit -go=1.25.0
+fi
+
 go vet ./...
 go test ./...
